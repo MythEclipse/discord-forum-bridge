@@ -1,10 +1,21 @@
 'use strict';
 
 /**
- * NodeBB write API v3 client (minimal).
+ * NodeBB API v3 client (minimal).
  *
- * Only the endpoints the bridge needs are implemented. Every call carries the
- * dedicated user token, never the admin master token.
+ * TOKEN SEMANTICS - read before changing anything. NodeBB has two token
+ * flavours and the bridge is given the MASTER one:
+ *
+ *   - **master token** (`settings:core.api` "Cyrene manager" style): full
+ *     access, but every call must carry `?_uid=<uid>` on the query string.
+ *     Without it NodeBB answers 400 "A master token was received without a
+ *     corresponding `_uid`", and `/api/config` 500s with
+ *     `[[error:api.master-token-no-uid]]`.
+ *   - **user token** (per-user API token): no `_uid` needed, but limited to that
+ *     user's own privileges.
+ *
+ * `NODEBB_AUTH_MODE` in .env decides which one is in use, so a mismatch fails
+ * loudly at boot instead of 400ing on every request.
  */
 
 const http = require('http');
@@ -60,18 +71,77 @@ function request(method, url, { token, body, headers = {} } = {}) {
 	});
 }
 
-function createClient({ url, apiToken }) {
+function withUid(endpoint, uid) {
+	if (uid === undefined || uid === null || uid === '') {
+		return endpoint;
+	}
+	return `${endpoint}${endpoint.includes('?') ? '&' : '?'}_uid=${encodeURIComponent(uid)}`;
+}
+
+function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }) {
 	const base = `${url}/api/v3`;
-	const call = (method, endpoint, body) => request(method, `${base}${endpoint}`, { token: apiToken, body });
+	let authMode = mode === 'master' ? 'master' : 'user';
+	// Accept either key name: config.js names it `bridgeUid`, callers may pass `uid`.
+	let actorUid = uid === undefined || uid === null || uid === '' ? (bridgeUid || '') : uid;
+
+	// master tokens require _uid; a missing one is a hard config error
+	if (authMode === 'master' && (actorUid === '' || actorUid === undefined)) {
+		throw new Error('NODEBB_AUTH_MODE=master requires NODEBB_BRIDGE_UID to be set');
+	}
+
+	// v3 wraps every response as `{ status, response }`. Callers want the payload,
+	// so unwrap here - otherwise `res.categories` is always undefined and a
+	// missing-key bug looks like an API failure.
+	function call(method, endpoint, body) {
+		const full = authMode === 'master' ? withUid(endpoint, actorUid) : endpoint;
+		return request(method, `${base}${full}`, { token: apiToken, body })
+			.then((res) => (res && typeof res === 'object' && 'response' in res ? res.response : res));
+	}
 
 	return {
+		get authMode() {
+			return authMode;
+		},
+
+		get actorUid() {
+			return actorUid;
+		},
+
+		// Fails loudly if the token flavour and _uid handling disagree.
+		async probe() {
+			await call('GET', '/categories');
+			return { authMode, actorUid };
+		},
+
 		raw: (method, endpoint, body) => call(method, endpoint, body),
+
+		// GET <url>/api/imrnes-ranks/levels - public, unauthenticated, cached by
+		// the forum. Registered by the rank plugin, so it 404s if the plugin is
+		// missing; callers must fall back to the built-in ladder.
+		getRankLadder: () => request('GET', `${url}/api/imrnes-ranks/levels`, {}),
 
 		// GET /api/v3/config
 		getConfig: () => call('GET', '/config'),
 
-		// GET /api/v3/categories?slug=<slug>
-		getCategoryBySlug: (slug) => call('GET', `/categories?slug=${encodeURIComponent(slug)}`),
+		// Resolve a category by slug.
+		//
+		// The v3 `?slug=` query parameter is IGNORED by NodeBB - it always returns
+		// every category - so filter client-side. Stored slugs are `cid/name`
+		// (e.g. `2/general-discussion`), so match the trailing segment too.
+		async getCategoryBySlug(slug) {
+			const wanted = String(slug || '').trim().toLowerCase();
+			const res = await call('GET', '/categories');
+			const categories = (res && res.categories) || [];
+			if (!wanted) {
+				return { categories };
+			}
+			const matched = categories.filter((c) => {
+				const full = String(c.slug || '').toLowerCase();
+				const tail = full.split('/').pop();
+				return full === wanted || tail === wanted;
+			});
+			return { categories: matched };
+		},
 
 		// GET /api/v3/topics/<tid>
 		getTopic: (tid) => call('GET', `/topics/${encodeURIComponent(tid)}`),
@@ -81,12 +151,22 @@ function createClient({ url, apiToken }) {
 			call('GET', `/topics/${encodeURIComponent(tid)}/posts?start=${from}&stop=${to}`),
 
 		// POST /api/v3/topics  { cid, title, content, uid }
-		createTopic: ({ cid, title, content, uid }) =>
-			call('POST', '/topics', { cid, title, content, uid, tags: [] }),
+		createTopic: ({ cid, title, content }) => {
+			const payload = { cid, title, content, tags: [] };
+			if (authMode === 'master') {
+				payload._uid = actorUid;
+			}
+			return call('POST', '/topics', payload);
+		},
 
-		// POST /api/v3/topics/<tid>/posts { content, uid }
-		replyToTopic: (tid, { content, uid }) =>
-			call('POST', `/topics/${encodeURIComponent(tid)}/posts`, { content, uid }),
+		// POST /api/v3/topics/<tid>/posts { content, _uid }
+		replyToTopic: (tid, { content }) => {
+			const payload = { content };
+			if (authMode === 'master') {
+				payload._uid = actorUid;
+			}
+			return call('POST', `/topics/${encodeURIComponent(tid)}/posts`, payload);
+		},
 
 		// GET /api/v3/users/username/<username>  -> resolved user object
 		getUserByUsername: (username) =>
@@ -94,4 +174,4 @@ function createClient({ url, apiToken }) {
 	};
 }
 
-module.exports = { createClient, NodebbError };
+module.exports = { createClient, NodebbError, withUid };

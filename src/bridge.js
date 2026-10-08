@@ -43,15 +43,19 @@ class Bridge {
 
 	async loadRankLadder() {
 		// The forum's rank plugin owns the ladder; read it so ACP edits propagate.
+		// GET /api/imrnes-ranks/levels is a public read-only route the plugin
+		// registers on load - no token needed.
 		try {
-			const res = await this.nodebb.raw('GET', '/../../__imrnesLadder', null).catch(() => null);
-			if (res && res.levels) {
+			const res = await this.nodebb.getRankLadder();
+			if (res && Array.isArray(res.levels) && res.levels.length) {
 				this.identity.setLadder(res.levels);
-				log.info('rank ladder refreshed', `${this.identity.ladder.length} levels`);
+				log.info('rank ladder refreshed', `${this.identity.ladder.length} levels from forum`);
 				return;
 			}
-		} catch (err) { /* fall through to defaults */ }
-		log.info('rank ladder using defaults');
+			log.warn('forum returned an empty ladder, keeping previous/defaults');
+		} catch (err) {
+			log.warn('rank ladder fetch failed, using defaults', err.message);
+		}
 	}
 
 	async ensureTopic() {
@@ -78,19 +82,13 @@ class Bridge {
 			log.warn('category lookup failed, falling back to default category', err.message);
 		}
 
-		if (cid === null) {
-			const cfg = await this.nodebb.getConfig();
-			const cats = (cfg && cfg.categories) || [];
-			if (cats.length) {
-				cid = cats[0].cid;
-			}
-		}
+		// No slug match and no fallback: the write will fail loudly rather than
+		// silently posting to an arbitrary category.
 
 		const created = await this.nodebb.createTopic({
 			cid: cid,
 			title: title,
 			content: intro,
-			uid: this.config.nodebb.bridgeUid || undefined,
 		});
 		this.topicId = created.tid;
 		this.topicTitle = created.slug || title;
@@ -129,10 +127,7 @@ class Bridge {
 		}
 		const tid = await this.ensureTopic();
 		const content = this.discordMessageToHtml(message, member);
-		const res = await this.nodebb.replyToTopic(tid, {
-			content,
-			uid: this.config.nodebb.bridgeUid || undefined,
-		});
+		const res = await this.nodebb.replyToTopic(tid, { content });
 		this.seenDiscord.add(message.id);
 		log.info('discord -> forum', { discordId: message.id, pid: res && res.pid });
 		return res;

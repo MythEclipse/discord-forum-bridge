@@ -6,9 +6,12 @@
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
-    "check": "node --check src/main.js && node --check src/bridge.js && node --check src/nodebb.js && node --check src/identity.js && node --check src/config.js && node scripts/smoke.js"
+    "check": "node --check src/main.js && node --check src/bridge.js && node --check src/nodebb.js && node --check src/identity.js && node --check src/config.js && node scripts/smoke.js",
+    "probe:forum": "node scripts/probe-forum.js"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "discord.js": "^14.27.0"
   }

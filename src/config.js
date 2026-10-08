@@ -13,10 +13,13 @@ const ENV_PATH = path.join(__dirname, '..', '.env');
 
 function parseEnv(file) {
 	const out = {};
-	if (!fs.existsSync(file)) {
+	// default to ENV_PATH: an undefined path makes fs.existsSync throw a
+	// deprecation warning and returns false, silently yielding an empty env.
+	const target = file || ENV_PATH;
+	if (!fs.existsSync(target)) {
 		return out;
 	}
-	fs.readFileSync(file, 'utf8').split(/\r?\n/).forEach((raw) => {
+	fs.readFileSync(target, 'utf8').split(/\r?\n/).forEach((raw) => {
 		const line = raw.trim();
 		if (!line || line.startsWith('#')) {
 			return;
@@ -50,7 +53,8 @@ function num(name, fallback) {
 	return Number.isFinite(value) ? value : fallback;
 }
 
-const config = Object.freeze({
+function buildConfig() {
+	return Object.freeze({
 	discord: {
 		appId: required('DISCORD_APP_ID'),
 		botToken: required('DISCORD_BOT_TOKEN'),
@@ -63,6 +67,10 @@ const config = Object.freeze({
 	nodebb: {
 		url: (env.NODEBB_URL || 'https://forum.imrnes.team').replace(/\/+$/, ''),
 		apiToken: required('NODEBB_API_TOKEN'),
+		// The token handed to the bridge is a MASTER token, which NodeBB only
+		// accepts together with `?_uid=`. Leaving authMode on 'user' would 400 on
+		// every single call, so this is explicit rather than inferred.
+		authMode: env.NODEBB_AUTH_MODE || 'master',
 		bridgeUid: env.NODEBB_BRIDGE_UID || '',
 	},
 	forum: {
@@ -74,6 +82,47 @@ const config = Object.freeze({
 		raceSyncIntervalMs: num('RANK_SYNC_INTERVAL_SECONDS', 300) * 1000,
 		marker: env.BRIDGE_MARKER || '<!-- discord-bridge -->',
 	},
-});
+	});
+}
 
-module.exports = { config, parseEnv };
+// Lazy on purpose. An eager `Object.freeze({...})` runs the `required()` checks
+// at require() time, so merely importing this module throws when DISCORD_BOT_TOKEN
+// is absent - which blocks forum-only tooling from loading the NodeBB half.
+let cached = null;
+
+module.exports = {
+	parseEnv,
+	loadNodebbConfig,
+	get config() {
+		if (!cached) {
+			cached = buildConfig();
+		}
+		return cached;
+	},
+};
+
+/**
+ * Load only the NodeBB half of the config.
+ *
+ * `config` is built eagerly and fail-fasts on a missing DISCORD_BOT_TOKEN, which
+ * is correct for the bridge process but blocks forum-only tooling (the ACP panel
+ * verification script, the live probe) from checking the forum side before the
+ * bot credentials exist. `loadNodebbConfig()` parses .env again and validates
+ * only what the forum half needs.
+ */
+function loadNodebbConfig() {
+	const env = parseEnv();
+	if (!env.NODEBB_API_TOKEN) {
+		throw new Error(`Missing required config NODEBB_API_TOKEN in ${ENV_PATH}`);
+	}
+	if ((env.NODEBB_AUTH_MODE || 'master') === 'master' && !env.NODEBB_BRIDGE_UID) {
+		throw new Error('NODEBB_AUTH_MODE=master requires NODEBB_BRIDGE_UID');
+	}
+	return {
+		url: (env.NODEBB_URL || 'https://forum.imrnes.team').replace(/\/+$/, ''),
+		apiToken: env.NODEBB_API_TOKEN,
+		authMode: env.NODEBB_AUTH_MODE || 'master',
+		bridgeUid: env.NODEBB_BRIDGE_UID || '',
+	};
+}
+
