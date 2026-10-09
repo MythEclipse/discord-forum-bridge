@@ -55,10 +55,18 @@ function makeMirror(overrides = {}) {
 		listCategoryTopics: async (_cid, { from = 0, to = 50 } = {}) => ({ topics: topics.slice(from, to) }),
 		getTopicPosts: async (tid) => ({ posts: overrides.postsByTopic?.[tid] || [] }),
 		getUser: async (uid) => overrides.users?.[uid] || { uid, username: `user${uid}`, postcount: 0 },
-		getUserByUsername: async (u) => ({ uid: 1, username: u, postcount: 0 }),
+		// Resolves only names the test declares, so "unlinked member" is a real
+		// negative case rather than an accidental uid-1 hit.
+		getUserByUsername: async (u) => {
+			const hit = overrides.forumUsersByName?.[u.toLowerCase()];
+			if (!hit) {
+				throw new Error(`no such forum user: ${u}`);
+			}
+			return hit;
+		},
 		getRankLadder: async () => ({ levels: [{ min: 0, name: '[Neophyte]' }, { min: 3, name: '[Apprentice]' }] }),
-		replyToTopic: async (tid, { content }) => {
-			calls.replies.push({ tid, content });
+		replyToTopic: async (tid, { content, asUid }) => {
+			calls.replies.push({ tid, content, asUid });
 			return { pid: 900 + calls.replies.length };
 		},
 	};
@@ -86,6 +94,10 @@ function makeMirror(overrides = {}) {
 
 	const identity = new IdentityStore();
 	identity.setLadder(overrides.ladder || [{ min: 0, name: '[Neophyte]' }, { min: 3, name: '[Apprentice]' }]);
+	// Seed the identity store in memory only. setLink() would rewrite
+	// data/links.json, so the store's map is populated directly to keep the test
+	// hermetic.
+	(overrides.links || []).forEach((link) => identity.byDiscordId.set(String(link.discordId), link));
 
 	const logs = [];
 	const log = {
@@ -218,7 +230,12 @@ function makeMirror(overrides = {}) {
 	console.log('ok - polling is idempotent');
 
 	/* ── discord -> forum ────────────────────────────────────────────── */
-	const down = makeMirror({ topics: [{ tid: 7, title: 'Diskusi IMRNES', uid: 3, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'potatochips' } }] });
+	const down = makeMirror({
+		topics: [{ tid: 7, title: 'Diskusi IMRNES', uid: 3, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'potatochips' } }],
+		members: { U1: { id: 'U1', displayName: 'tester', user: { username: 'tester' } } },
+		links: [{ discordId: 'U1', username: 'tester' }],
+		forumUsersByName: { tester: { uid: 42, username: 'tester', postcount: 25 } },
+	});
 	await down.mirror.start();
 	await down.mirror.backfill();
 	const post = await down.mirror.onDiscordMessage({
@@ -232,12 +249,36 @@ function makeMirror(overrides = {}) {
 	assert.strictEqual(down.calls.replies[0].tid, '7', 'posted to the mapped topic');
 	assert.ok(down.calls.replies[0].content.includes('halo dari discord'), 'content forwarded');
 	assert.ok(down.calls.replies[0].content.includes('imrnes-bridge'), 'marker embedded in the forum post');
-	// The rank travels as a markdown code span, not an HTML <span>: the ranks
-	// plugin injects the styled badge next to the username via a theme patch,
-	// and NodeBB's sanitizer strips class attributes anyway.
-	assert.ok(down.calls.replies[0].content.includes('`[Apprentice]`') || down.calls.replies[0].content.includes('`[Neophyte]`'), 'rank included as markdown');
-	assert.ok(!down.calls.replies[0].content.includes('<span'), 'no raw HTML in the forum body');
-	console.log('ok - discord -> forum: routed to the right topic, marker + rank embedded');
+	// Discord -> forum must NOT carry a rank in the body. The forum draws its
+	// own styled badge next to the username, and a body rank would be an
+	// unstyled duplicate attributed to the posting account.
+	assert.ok(!down.calls.replies[0].content.includes('[Apprentice]'), 'no rank in the Discord->forum body');
+	assert.ok(!down.calls.replies[0].content.includes('[Neophyte]'), 'no rank in the Discord->forum body');
+	assert.ok(!/<[a-z/][^>]*>/i.test(down.calls.replies[0].content.replace(MARKER, '')), 'no raw HTML in the forum body');
+	console.log('ok - discord -> forum: routed to the right topic, marker embedded, no rank in body');
+
+	/* ── author attribution: post as the HUMAN, not the bridge ────────────
+	 * The whole point of dropping the body rank is that the forum then awards
+	 * the right badge, which requires the post to be authored by the human's
+	 * own forum account. Without a link the bridge must still post as itself.
+	 */
+	assert.strictEqual(down.calls.replies[0].asUid, 42, 'impersonates the linked forum uid, not the bridge');
+	console.log('ok - discord -> forum: posted as the linked human account');
+
+	const unlinked = makeMirror({
+		topics: [{ tid: 7, title: 'Diskusi IMRNES', uid: 3, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'potatochips' } }],
+		members: {}, // nobody linked
+	});
+	await unlinked.mirror.start();
+	await unlinked.mirror.backfill();
+	await unlinked.mirror.onDiscordMessage({
+		id: 'DM9', channelId: 'TH1', content: 'tanpa link',
+		url: 'https://discord.com/channels/G/C/DM9',
+		author: { id: 'U9', bot: false, username: 'stranger' },
+		member: null,
+	});
+	assert.strictEqual(unlinked.calls.replies[0].asUid, undefined, 'unlinked member posts as the bridge');
+	console.log('ok - discord -> forum: unlinked member falls back to the bridge account');
 
 	// bot messages and duplicates are ignored
 	const none = await down.mirror.onDiscordMessage({

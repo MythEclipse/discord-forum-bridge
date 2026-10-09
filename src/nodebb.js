@@ -205,10 +205,16 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 		// NOT `/topics/<tid>/posts` - that path does not exist and answers 404
 		// "Invalid API call". src/routes/write/topics.js registers the reply as
 		// `post /:tid` on the topics router, so the reply URL is the topic URL.
-		replyToTopic: (tid, { content }) => {
+		//
+		// `asUid` impersonates a specific account so a Discord message is
+		// attributed to the human's forum account instead of the bridge's, which
+		// is what makes the ranks plugin award the badge for THIS post. It only
+		// works with a master token; a per-user token falls back to the bridge
+		// account. It is used for posting only, never for reads.
+		replyToTopic: (tid, { content, asUid } = {}) => {
 			const payload = { content };
 			if (authMode === 'master') {
-				payload._uid = actorUid;
+				payload._uid = asUid || actorUid;
 			}
 			return call('POST', `/topics/${encodeURIComponent(tid)}`, payload);
 		},

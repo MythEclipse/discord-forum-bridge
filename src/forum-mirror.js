@@ -227,17 +227,51 @@ class ForumMirror {
 
 		const member = await this.discord.fetchMember(message.author.id);
 		const nickname = member ? (member.displayName || member.user.username) : message.author.username;
-		const postcount = await this.discordForumPostcount(member, nickname);
+
+		// Resolve the author's forum account so the reply is attributed to THEM.
+		// This is what makes the ranks plugin award their own badge: a post made
+		// by the bridge account would show the bridge's rank, and any rank we
+		// wrote into the body would be a second, unstyled label for the wrong
+		// person. Falls back to the bridge account when there is no link.
+		const forumUid = await this.discordForumUid(member, nickname);
+		const forumUser = forumUid ? await this.nodebb.getUser(forumUid).catch(() => null) : null;
+		const postcount = Number(forumUser && forumUser.postcount) || 0;
 		const rank = this.identity.rankTitleFor(postcount);
 
+		// Deliberately no `rank` in the body: the forum draws its own badge next
+		// to the username, and a body rank would be a duplicate for the wrong
+		// account. The rank IS still used above for the outbound Discord mirror
+		// and for the log line.
 		const res = await this.nodebb.replyToTopic(tid, {
-			content: this.renderForumPost({
-				nickname, rank, content: message.content, link: message.url,
-			}),
+			content: this.renderForumPost({ nickname, content: message.content, link: message.url }),
+			asUid: forumUid || undefined,
 		});
 		this.seenDiscord.add(message.id);
-		this.log.info('discord -> forum', { tid, pid: res && res.pid, discord: message.id });
+		this.log.info('discord -> forum', {
+			tid, pid: res && res.pid, discord: message.id, as: forumUid || 'bridge', rank,
+		});
 		return res;
+	}
+
+	/**
+	 * Map a Discord member to a forum uid via the identity store. Returns null
+	 * when the member is not linked, and the caller then posts as the bridge.
+	 */
+	async discordForumUid(member, nickname) {
+		if (!member) {
+			return null;
+		}
+		const link = this.identity.findByDiscordId(member.id)
+			|| (nickname ? this.identity.findByUsername(nickname) : null);
+		if (!link || !link.username) {
+			return null;
+		}
+		try {
+			const forumUser = await this.nodebb.getUserByUsername(link.username);
+			return (forumUser && forumUser.uid) || null;
+		} catch (err) {
+			return null;
+		}
 	}
 
 	async topicIdForDiscordMessage(message) {
@@ -247,27 +281,6 @@ class ForumMirror {
 		const name = String((message.channel && message.channel.name) || '');
 		const match = name.match(/\[t:(\d+)\]/);
 		return match ? match[1] : null;
-	}
-
-	/**
-	 * Resolve a member's forum post count so the rank shown in Discord is the
-	 * forum rank, not a Discord-side approximation.
-	 */
-	async discordForumPostcount(member, nickname) {
-		if (!member) {
-			return 0;
-		}
-		const link = this.identity.findByDiscordId(member.id)
-			|| (nickname ? this.identity.findByUsername(nickname) : null);
-		if (!link || !link.username) {
-			return 0;
-		}
-		try {
-			const forumUser = await this.nodebb.getUserByUsername(link.username);
-			return Number(forumUser && forumUser.postcount) || 0;
-		} catch (err) {
-			return 0;
-		}
 	}
 
 	/* ───────────────────── forum inbound: post -> thread reply ─────────── */

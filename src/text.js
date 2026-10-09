@@ -109,18 +109,26 @@ function mdCode(text) {
 }
 
 /**
- * Build the markdown body for a Discord reply mirrored into a forum topic.
- *
- * Format notes, all forced by how the forum actually renders:
- *  - markdown, not HTML: nodebb-plugin-markdown has `html: false`, so HTML we
- *    send comes out escaped and double-wrapped in `<p dir="auto">`.
- *  - no `<span class="imrnes-rank">`: the ranks plugin already injects the badge
- *    next to the username via a theme patch, and NodeBB's sanitizer strips
- *    `class` anyway (sanitizeConfig has no allowedClasses), so a second badge
- *    in the body is both redundant and unstyleable.
- *  - the rank is kept as a bold line so it still reads as a label in the post
- *    body, in the thread view and in e-mail notifications.
- */
+	 * Build the markdown body for a Discord reply mirrored into a forum topic.
+	 *
+	 * Direction matters here. Forum -> Discord renders the rank as a label
+	 * because Discord has no plugin that can style an author's badge. The
+	 * reverse direction must NOT: the forum already injects a styled badge next
+	 * to the username via the ranks plugin theme patch, and NodeBB's sanitizer
+	 * strips `class`, so a rank in the body would be an unstyled duplicate of
+	 * a badge the theme already draws. Worse, the rank is attributed to the
+	 * posting account, so a body rank shows the BRIDGE's rank, not the human's.
+	 *
+	 * The human's identity travels instead, as a plain markdown line that
+	 * survives the markdown render pass:
+	 *   **Name** *(via Discord)* — followed by the quoted message and link.
+	 *
+	 * @param {object}  opts
+	 * @param {string}  opts.nickname  author's display name on Discord
+	 * @param {string}  [opts.rank]    omitted for Discord -> forum on purpose
+	 * @param {string}  opts.content   the Discord message
+	 * @param {string}  [opts.link]    permalink back to the Discord message
+	 */
 function forumPostMarkdown({ nickname, rank, content, link }) {
 	const lines = [];
 	lines.push(`**${mdLiteral(nickname)}**`);
