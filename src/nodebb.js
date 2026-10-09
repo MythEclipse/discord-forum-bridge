@@ -264,11 +264,46 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 		 * which returns the stored value untouched. Small N (a bridge topic is a
 		 * handful of posts) so the extra requests are cheap.
 		 */
-		async getTopicPosts(tid) {
+		/**
+		 * All posts of a topic, newest included.
+		 *
+		 * PAGINATION IS NOT OPTIONAL. `GET /api/topic/<tid>` returns one page
+		 * (`postsPerPage`, 15 by default) and its `page` parameter is 1-BASED, so
+		 * `?page=2` is the SECOND page. Reading only the default page silently
+		 * caps the bridge at the first 15 posts of a topic: with a cursor past
+		 * that, every later post - including anything with an image - is
+		 * invisible forever, with no error anywhere. That is exactly how a GIF
+		 * posted as reply 47 "never reached" Discord.
+		 *
+		 * v1 is still the right source for the pid LIST (v3 has no such route)
+		 * and it reports how many pages exist, so walk to the end and stop as
+		 * soon as a page comes back empty.
+		 */
+		async getTopicPosts(tid, { maxPages = 40 } = {}) {
 			const endpoint = `/api/topic/${encodeURIComponent(tid)}`;
-			const full = authMode === 'master' ? withUid(endpoint, actorUid) : endpoint;
-			const listing = await request('GET', `${url}${full}`, { token: apiToken });
-			const pids = (listing && listing.posts ? listing.posts : []).map((p) => p.pid);
+			const withPage = (page) => {
+				const q = page ? `?page=${page}` : '';
+				const full = authMode === 'master' ? withUid(`${endpoint}${q}`, actorUid) : `${endpoint}${q}`;
+				return request('GET', `${url}${full}`, { token: apiToken });
+			};
+
+			const pids = [];
+			const seen = new Set();
+			for (let page = 1; page <= maxPages; page += 1) {
+				// eslint-disable-next-line no-await-in-loop
+				const listing = await withPage(page);
+				const batch = (listing && listing.posts ? listing.posts : []);
+				if (!batch.length) {
+					break;
+				}
+				batch.forEach((p) => {
+					const pid = Number(p && p.pid);
+					if (pid && !seen.has(pid)) {
+						seen.add(pid);
+						pids.push(pid);
+					}
+				});
+			}
 			if (!pids.length) {
 				return { posts: [] };
 			}
@@ -281,7 +316,9 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 					return null;
 				}
 			}));
-			return { posts: posts.filter(Boolean) };
+			// Ascending: the mirror walks the topic in order and the cursor is a
+			// high-water mark over pids.
+			return { posts: posts.filter(Boolean).sort((a, b) => Number(a.pid) - Number(b.pid)) };
 		},
 
 		// POST /api/v3/topics  { cid, title, content, uid }
