@@ -237,8 +237,9 @@ function load(data) {
 	}
 	mounted = true;
 
-	// Repair multer's missing destination before setupApiRoute builds its
-	// `upload.any()` from `middleware/multer`.
+	// Harmless hardening, NOT the fix for the 500. Keep it: it guarantees a real
+	// destination regardless of multer's internal fallback, and also repairs
+	// core's `/api/post/upload`, which has the same destination-less storage.
 	if (ensureMulterDestination()) {
 		// eslint-disable-next-line no-console
 		console.log(`[${pluginData.id}] patched multer.diskStorage destination -> ${TEMP_UPLOAD_DIR}`);
@@ -252,6 +253,18 @@ function load(data) {
 		// does the same thing: `setupApiRoute(router, 'get', '/api/v3/ping', ...)`.
 		router, 'post', '/api/v3/bridge-upload',
 		[
+			// THE missing piece. `uploadsController.upload` reads
+			// `path.extname(uploadedFile.name)` and `uploadedFile.type`, but multer
+			// only ever sets `originalname` / `mimetype`. Core converts between the
+			// two in `middleware.validateFiles` (src/middleware/index.js:104-115:
+			// "multer uses originalname and mimetype, but we use name and type"),
+			// which it wires into its own upload routes (src/routes/api.js:28-32)
+			// - but NOT into `setupApiRoute`, which only injects `upload.any()`.
+			// Without this, `name` is undefined and `path.extname(undefined)`
+			// throws "The "path" argument must be of type string. Received
+			// undefined" out of uploads.js:215. Also normalises multer's
+			// `req.files` object into the array the controller requires.
+			middleware.validateFiles,
 			// setupApiRoute already applied upload.any(); NodeBB's own route also
 			// caps the count and ratelimits, so reuse both.
 			(req, res, next) => {
