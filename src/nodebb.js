@@ -160,23 +160,45 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 		getCategoryTopics: (cid, { from = 0, to = 50 } = {}) =>
 			call('GET', `/categories/${encodeURIComponent(cid)}/topics?start=${from}&stop=${to}`),
 
-		// Posts of a topic.
-		//
-		// There is NO v3 endpoint for this: src/routes/write/topics.js registers
-		// only /:tid, /:tid/thumbs, /:tid/events and /:tid/crossposts, and
-		// write/posts.js only exposes a single /:pid. Calling
-		// /api/v3/topics/<tid>/posts returns 404 "Invalid API call" no matter what
-		// pagination params you send. The v1 read API is the working path:
-		//
-		//     GET /api/topic/<tid>   ->  { posts: [...] }
-		//
-		// v1 does NOT wrap the body in { status, response }, so `call` must not be
-		// used here - it would return the object unchanged, which is fine, but the
-		// master-token `_uid` has to be appended manually.
-		getTopicPosts(tid) {
+		/**
+		 * Posts of a topic, as RAW stored HTML.
+		 *
+		 * There is NO v3 endpoint for this - `src/routes/write/topics.js` registers
+		 * only `/:tid`, `/:tid/thumbs`, `/:tid/events`, `/:tid/crossposts`, and
+		 * `write/posts.js` only exposes a single `/:pid`. So the list has to come
+		 * from v1 (`GET /api/topic/<tid>`) - but v1 WRAPS the body in
+		 * `<p dir="auto">...</p>` and HTML-ESCAPES it:
+		 *
+		 *     stored:  <p>hello</p><!-- discord-bridge -->
+		 *     v1 says: <p dir="auto">&lt;p&gt;hello&lt;/p&gt;&lt;!-- ... --&gt;</p>
+		 *
+		 * Two consequences, both of which broke the bridge:
+		 *   1. an HTML-comment marker check can never match over v1;
+		 *   2. stripping tags to make Discord text leaves `&lt;p&gt;hello`.
+		 *
+		 * So: read the pid list from v1 (it is trustworthy - only the body is
+		 * mangled), then re-fetch each post through v3 `GET /api/v3/posts/<pid>`,
+		 * which returns the stored value untouched. Small N (a bridge topic is a
+		 * handful of posts) so the extra requests are cheap.
+		 */
+		async getTopicPosts(tid) {
 			const endpoint = `/api/topic/${encodeURIComponent(tid)}`;
 			const full = authMode === 'master' ? withUid(endpoint, actorUid) : endpoint;
-			return request('GET', `${url}${full}`, { token: apiToken });
+			const listing = await request('GET', `${url}${full}`, { token: apiToken });
+			const pids = (listing && listing.posts ? listing.posts : []).map((p) => p.pid);
+			if (!pids.length) {
+				return { posts: [] };
+			}
+			const posts = await Promise.all(pids.map(async (pid) => {
+				try {
+					const post = await call('GET', `/posts/${encodeURIComponent(pid)}`);
+					return Object.assign({ pid }, post);
+				} catch (err) {
+					// a single unreadable post must not break the whole poll
+					return null;
+				}
+			}));
+			return { posts: posts.filter(Boolean) };
 		},
 
 		// POST /api/v3/topics  { cid, title, content, uid }
