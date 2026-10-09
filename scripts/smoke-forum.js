@@ -69,6 +69,13 @@ function makeMirror(overrides = {}) {
 			calls.replies.push({ tid, content, asUid });
 			return { pid: 900 + calls.replies.length };
 		},
+		// Creating a forum topic from a NEW Discord thread. `asUid` mirrors the
+		// reply path so the topic is owned by the linked human, which is what
+		// makes the ranks plugin badge the author correctly.
+		createTopic: async ({ cid, title, content, asUid }) => {
+			calls.topics.push({ cid, title, content, asUid });
+			return { tid: 500 + calls.topics.length, title, content };
+		},
 		downloadBinary: async (url) => {
 			calls.downloads.push(url);
 			return Buffer.from('PNGDATA');
@@ -561,6 +568,93 @@ function makeMirror(overrides = {}) {
 		console.log('ok - forum images (incl. GIF) render inline in the Discord mirror');
 	}
 
+
+	/* ── a NEW Discord thread must create a forum topic ────────────────
+	 * The gap this covers: `main.js` only forwarded a message when the thread
+	 * already had a `threadToTopic` mapping. A brand-new thread posted directly
+	 * in the Discord forum channel had no mapping, so it was silently dropped -
+	 * the topic did not exist on the forum at all. Reply-in-existing-thread and
+	 * forum->Discord kept working, which is why it looked like "only one
+	 * direction is broken".
+	 */
+	{
+		const { mirror, calls, logs } = makeMirror({
+			topics: [],                       // empty forum: nothing mapped yet
+			existingThreads: [{ id: 'TH_NEW', name: 'Diskusi baru dari Discord' }],
+			members: { D9: { id: 'D9', displayName: 'za', user: { username: 'za' } } },
+			links: [{ discordId: 'D9', username: 'za' }],
+			forumUsersByName: { za: { uid: 4, username: 'za', postcount: 5 } },
+		});
+		// The thread the user just made in the forum channel. start() resolves
+		// the category cid, which adoptDiscordThread() needs before it can post.
+		await mirror.start();
+
+		const made = await mirror.adoptDiscordThread('TH_NEW', 'Diskusi baru dari Discord', {
+			author: { id: 'D9', username: 'za' },
+		});
+		assert.ok(made && made.tid, 'adopting a new thread yields a forum tid');
+		assert.strictEqual(calls.topics.length, 1, 'exactly one topic created');
+		assert.strictEqual(calls.topics[0].cid, 2, 'created in the bridged category');
+		assert.ok(String(calls.topics[0].title).length > 0, 'topic has a title');
+		assert.strictEqual(calls.topics[0].asUid, 4, 'topic owned by the linked human, not the bridge');
+		assert.strictEqual(mirror.threadToTopic.get('TH_NEW'), String(made.tid), 'thread now maps back to the topic');
+		assert.strictEqual(mirror.topicToThread.get(String(made.tid)), 'TH_NEW', 'and the reverse mapping exists too');
+		console.log('ok - a new discord thread creates a forum topic and maps both ways');
+	}
+
+	/* ── adopting must be idempotent and thread-safe ───────────────────
+	 * Two messages can arrive in the same tick (a fast typist, or two people
+	 * posting at once). Without a single-flight guard each would create its own
+	 * topic and the two would fight over `threadToTopic`, leaving the first
+	 * orphaned on the forum.
+	 */
+	{
+		const { mirror, calls } = makeMirror({ topics: [], existingThreads: [] });
+		await mirror.start();
+		const [a, b] = await Promise.all([
+			mirror.adoptDiscordThread('TH_RACE', 'Balapan', { author: { id: 'D1', username: 'u' } }),
+			mirror.adoptDiscordThread('TH_RACE', 'Balapan', { author: { id: 'D1', username: 'u' } }),
+		]);
+		assert.strictEqual(calls.topics.length, 1, `concurrent adoption creates one topic (got ${calls.topics.length})`);
+		assert.strictEqual(String(a.tid), String(b.tid), 'both callers get the same tid');
+		console.log('ok - concurrent adoption of one thread creates exactly one topic');
+	}
+
+	/* ── a mapped thread must NOT create a second topic ─────────────────
+	 * The regression guard for the new code path: a reply in an already-mapped
+	 * thread is a reply, not a new topic.
+	 */
+	{
+		const { mirror, calls } = makeMirror({
+			topics: [], existingThreads: [{ id: 'TH_1', name: '[t:1] Welcome' }],
+		});
+		await mirror.start();
+		mirror.topicToThread.set('1', 'TH_1');
+		mirror.threadToTopic.set('TH_1', '1');
+		const res = await mirror.adoptDiscordThread('TH_1', '[t:1] Welcome', { author: { id: 'D1', username: 'u' } });
+		assert.strictEqual(calls.topics.length, 0, 'an already-mapped thread creates no topic');
+		assert.strictEqual(res && res.tid, '1', 'and resolves to the existing tid');
+		console.log('ok - an already-mapped thread is reused, not duplicated');
+	}
+
+	/* ── a failed topic creation must not leave a phantom mapping ──────
+	 * If NodeBB rejects the topic, `threadToTopic` must stay clean. Otherwise
+	 * the thread is permanently "mapped" to a tid that does not exist and every
+	 * later reply in it 404s.
+	 */
+	{
+		const { mirror, calls, nodebb } = makeMirror({ topics: [], existingThreads: [] });
+		await mirror.start();
+		nodebb.createTopic = async () => { throw new Error('cid not allowed'); };
+		await assert.rejects(
+			() => mirror.adoptDiscordThread('TH_BAD', 'Gagal', { author: { id: 'D1', username: 'u' } }),
+			/cid not allowed/,
+			'adoptDiscordThread propagates the underlying failure'
+		);
+		assert.ok(!mirror.threadToTopic.has('TH_BAD'), 'no phantom mapping survives a failure');
+		assert.strictEqual(calls.topics.length, 0, 'nothing recorded');
+		console.log('ok - a failed topic creation leaves no phantom mapping');
+	}
 
 	/* ── the logger must expose every level the bridge calls ─────────── */
 	// Regression: `this.log.debug(...)` was used for per-post skips, but the

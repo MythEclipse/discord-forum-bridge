@@ -86,11 +86,36 @@ async function main() {
 				await handleLink(message);
 				return;
 			}
-			// Only replies inside a mirrored thread become forum posts. A new
-			// top-level post in the forum channel is not a reply to any topic, so
-			// the poller creates the thread instead.
+			// A message inside a mapped thread is a reply to an existing topic.
 			if (mirror.threadToTopic.has(message.channelId)) {
 				await mirror.onDiscordMessage(message);
+				return;
+			}
+
+			// A message in a thread with NO mapping is a discussion the user just
+			// started in the forum channel. It needs a forum topic to exist at
+			// all: Discord will not accept a REST message into a thread that does
+			// not exist, so the topic is created first and the thread is mapped to
+			// it. Previously this message was dropped on the floor, which is why a
+			// brand-new thread never showed up on the forum while replies in
+			// already-mapped threads worked.
+			//
+			// Guarded on `channel.parentId` so a message in the forum channel
+			// itself (which has no parent thread) is ignored instead of creating a
+			// topic with no thread to mirror back into.
+			if (message.channel && message.channel.parentId) {
+				const channelName = message.channel.name || '';
+				const res = await mirror.adoptDiscordThread(
+					message.channelId, channelName,
+					{ author: message.author }
+				);
+				if (res && res.created) {
+					// Confirm in-channel so the user is not left guessing whether the
+					// post landed. Failure to send this must not undo the topic.
+					await message.channel.send(
+						`:white_check_mark: Diskusi ini sekarang ada di forum: ${config.nodebb.url}/topic/${res.tid}`
+					).catch((err) => log.warn('could not post the topic link', err.message));
+				}
 			}
 		} catch (err) {
 			log.error('discord message failed', err.message);

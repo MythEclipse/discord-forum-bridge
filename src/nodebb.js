@@ -322,10 +322,14 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 		},
 
 		// POST /api/v3/topics  { cid, title, content, uid }
-		createTopic: ({ cid, title, content }) => {
+		//
+		// `asUid` impersonates the linked human exactly like replyToTopic does,
+		// so a topic started from Discord is owned by them and the ranks plugin
+		// badges them as the author rather than the bridge account.
+		createTopic: ({ cid, title, content, asUid }) => {
 			const payload = { cid, title, content, tags: [] };
 			if (authMode === 'master') {
-				payload._uid = actorUid;
+				payload._uid = asUid || actorUid;
 			}
 			return call('POST', '/topics', payload);
 		},

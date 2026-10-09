@@ -107,6 +107,12 @@ class ForumMirror {
 		// thread ids proven to exist on Discord, so ensureThread() does not
 		// re-GET the same live thread for every single post
 		this.threadAlive = new Set();
+
+		// threadId -> Promise, for adoptDiscordThread(). Two messages can land in
+		// the same tick (a fast typist, or two people posting at once); without a
+		// single-flight guard each creates its OWN topic and they then fight over
+		// `threadToTopic`, orphaning the first on the forum.
+		this.adopting = new Map();
 	}
 
 	setBotUserId(id) {
@@ -373,6 +379,148 @@ class ForumMirror {
 		}
 		this.log.info('backfill complete', { topics: total, threadsCreated: created });
 		return { total, created };
+	}
+
+	/* ──────────────── discord inbound: new thread -> topic ────────────── */
+
+	/**
+	 * Make a Discord thread the mirror of a real forum topic.
+	 *
+	 * WHY this exists. `ensureThread` only goes forum -> Discord: it takes a
+	 * topic and creates/adopts a thread for it. The reverse was missing, so a
+	 * thread a USER created in the forum channel had no `threadToTopic` entry,
+	 * `main.js` skipped the message entirely, and the discussion simply did not
+	 * exist on the forum. Replies inside already-mapped threads and
+	 * forum -> Discord kept working, which is why the symptom read as "only one
+	 * direction is broken" rather than "new topics are dropped".
+	 *
+	 * Ordering matters and is not interchangeable:
+	 *  1. reuse an existing mapping - a mapped thread is a REPLY, never a new
+	 *     topic, or every reply would fork a fresh topic;
+	 *  2. single-flight per thread, so concurrent messages share one create;
+	 *  3. map the thread BEFORE persisting, and roll the mapping back if the
+	 *     create fails - a phantom `tid` would 404 every later reply.
+	 *
+	 * Discord will not accept a REST message into a thread that does not exist,
+	 * which is why the direction has to be "create topic, then map", never
+	 * "post, then create".
+	 *
+	 * @param {string} threadId
+	 * @param {string} title    Discord thread name; the `[t:N]` prefix, if any, is stripped
+	 * @param {object} opts
+	 * @param {object} opts.author  discord.js user shape ({ id, username })
+	 * @returns {Promise<{tid: string, created: boolean}>}
+	 */
+	async adoptDiscordThread(threadId, title, { author } = {}) {
+		const key = String(threadId);
+		if (!key || this.cid === null) {
+			return null;
+		}
+
+		// 1. Already mapped? Then this thread is a reply target, not a new topic.
+		const known = this.threadToTopic.get(key);
+		if (known) {
+			return { tid: known, created: false };
+		}
+
+		// 2. Single-flight: a second concurrent caller joins the first create
+		//    instead of racing it into a duplicate topic.
+		const inflight = this.adopting.get(key);
+		if (inflight) {
+			return inflight;
+		}
+
+		const task = (async () => {
+			// Re-check inside the guard: the first caller may have mapped it while
+			// this one was waiting to be scheduled.
+			const raced = this.threadToTopic.get(key);
+			if (raced) {
+				return { tid: raced, created: false };
+			}
+
+			const member = author && author.id ? await this.discord.fetchMember(author.id).catch(() => null) : null;
+			const nickname = (member && (member.displayName || member.user.username))
+				|| (author && (author.displayName || author.username))
+				|| 'Discord user';
+			const forumUid = await this.discordForumUid(member, nickname);
+			const cleanTitle = this.topicTitleFromThread(title);
+
+			let created;
+			try {
+				created = await this.nodebb.createTopic({
+					cid: this.cid,
+					title: cleanTitle,
+					content: this.renderDiscordThreadStarter(nickname, forumUid),
+					asUid: forumUid || undefined,
+				});
+			} catch (err) {
+				this.log.warn('discord thread -> forum topic failed', {
+					thread: key, title: cleanTitle, error: err.message,
+				});
+				throw err;
+			}
+
+			const tid = created && created.tid;
+			if (!tid) {
+				throw new Error('createTopic returned no tid');
+			}
+
+			this.topicToThread.set(String(tid), key);
+			this.threadToTopic.set(key, String(tid));
+			// The first post of a new topic is already in the forum, so the cursor
+			// starts AT it - otherwise the next poll would mirror the starter back
+			// into the Discord thread as if it were a fresh forum post.
+			if (created.mainPid) {
+				this.topicCursor.set(String(tid), Number(created.mainPid) || 0);
+				this.seenForum.add(Number(created.mainPid) || 0);
+			}
+			await this.persistState().catch((err) => {
+				this.log.warn('could not persist state after adopting thread', {
+					tid: String(tid), err: err.message,
+				});
+			});
+
+			this.log.info('discord thread -> forum topic', {
+				thread: key, tid, as: forumUid || 'bridge', title: cleanTitle,
+			});
+			return { tid: String(tid), created: true };
+		})();
+
+		this.adopting.set(key, task);
+		try {
+			return await task;
+		} finally {
+			this.adopting.delete(key);
+		}
+	}
+
+	/**
+	 * Turn a Discord thread name into a forum topic title.
+	 *
+	 * Strips the `[t:N]` stamp `threadNameFor` writes, otherwise a re-adopted
+	 * thread would create a topic literally titled "[t:42] ...".
+	 */
+	topicTitleFromThread(name) {
+		const raw = String(name || '').replace(/\[t:\d+\]/g, '').replace(/\s+/g, ' ').trim();
+		return (raw || 'Diskusi dari Discord').slice(0, 200);
+	}
+
+	/**
+	 * Body of the first post of a topic created from a Discord thread.
+	 *
+	 * Deliberately a stub rather than the thread's starter message: that message
+	 * already lives in the Discord thread, and re-posting it here would echo the
+	 * opening line twice. The link makes the two sides navigable from either end.
+	 */
+	renderDiscordThreadStarter(nickname, forumUid) {
+		const lines = [
+			`**${mdEscape(nickname)}** memulai diskusi ini dari Discord.`,
+		];
+		if (forumUid) {
+			lines.push('', `_via Discord - diposting sebagai akun forum_`);
+		}
+		lines.push('', MARKER);
+		return lines.join('\n');
 	}
 
 	/* ───────────────────── discord inbound: reply -> post ──────────────── */
