@@ -540,6 +540,23 @@ function makeMirror(overrides = {}) {
 		console.log('ok - forum images (incl. GIF) render inline in the Discord mirror');
 	}
 
+
+	/* ── the logger must expose every level the bridge calls ─────────── */
+	// Regression: `this.log.debug(...)` was used for per-post skips, but the
+	// logger only had info/warn/error. The resulting TypeError was caught by the
+	// caller and logged as "post mirror failed", so a routine skip looked exactly
+	// like a broken bridge.
+	{
+		const log = require('../src/log');
+		['debug', 'info', 'warn', 'error'].forEach((level) => {
+			assert.strictEqual(
+				typeof log[level], 'function', `log.${level} exists and is callable`
+			);
+			assert.doesNotThrow(() => log[level]('test line', { probe: true }), `log.${level} does not throw`);
+		});
+		console.log('ok - the logger exposes debug/info/warn/error');
+	}
+
 	/* ── ranking boundaries ──────────────────────────────────────────── */
 	const idn = new IdentityStore();
 	idn.setLadder([{ min: 0, name: '[Neophyte]' }, { min: 3, name: '[Apprentice]' }, { min: 10, name: '[Pathfinder]' }]);
