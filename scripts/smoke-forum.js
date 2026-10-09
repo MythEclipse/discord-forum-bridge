@@ -38,7 +38,7 @@ function restoreState() {
 }
 
 function makeMirror(overrides = {}) {
-	const calls = { threads: [], sent: [], replies: [], topics: [] };
+	const calls = { threads: [], sent: [], replies: [], topics: [], uploads: [], downloads: [] };
 
 	const topics = overrides.topics || [
 		{ tid: 1, title: 'Welcome Shounen', uid: 1, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'aryma' } },
@@ -68,6 +68,19 @@ function makeMirror(overrides = {}) {
 		replyToTopic: async (tid, { content, asUid }) => {
 			calls.replies.push({ tid, content, asUid });
 			return { pid: 900 + calls.replies.length };
+		},
+		downloadBinary: async (url) => {
+			calls.downloads.push(url);
+			return Buffer.from('PNGDATA');
+		},
+		uploadAttachment: async (buffer, filename, { asUid, contentType } = {}) => {
+			calls.uploads.push({
+				filename, asUid, contentType, bytes: buffer && buffer.toString(),
+			});
+			return {
+				url: `https://forum.imrnes.team/assets/uploads/files/1-${filename}`,
+				name: filename,
+			};
 		},
 	};
 
@@ -289,15 +302,69 @@ function makeMirror(overrides = {}) {
 		id: 'DM1', channelId: 'TH1', content: 'halo dari discord', author: { id: 'U1', bot: false, username: 'tester' },
 	});
 	assert.strictEqual(dup, null, 'duplicate message id ignored');
-	assert.strictEqual(down.calls.replies.length, 1, 'still one reply');
+	assert.strictEqual(down.calls.replies.length, 1, 'still exactly one reply after the two skips');
 	console.log('ok - discord -> forum: bot authors and duplicate ids skipped');
 
+
+	/* ── attachments: discord -> forum ──────────────────────────────── */
+	{
+		const withFiles = await down.mirror.onDiscordMessage({
+			id: 'DM_ATT', channelId: 'TH1', content: 'foto nih',
+			author: { id: 'U1', bot: false, username: 'tester' },
+			attachments: [
+				{ url: 'https://cdn.discordapp.com/a/px.png', name: 'px.png', type: 'image/png' },
+				{ url: 'https://cdn.discordapp.com/a/clip.mp4', name: 'clip.mp4', type: 'video/mp4' },
+			],
+		});
+		assert.ok(withFiles, 'a message with attachments still creates a post');
+		assert.strictEqual(down.calls.downloads.length, 2, 'both attachments are fetched');
+		assert.strictEqual(down.calls.uploads.length, 2, 'both are re-uploaded to the forum');
+		assert.strictEqual(down.calls.uploads[0].filename, 'px.png', 'original name preserved');
+		assert.strictEqual(down.calls.uploads[0].asUid, 42, 'upload is attributed to the linked human');
+		assert.strictEqual(down.calls.uploads[0].contentType, 'image/png', 'mime type forwarded');
+		assert.strictEqual(down.calls.uploads[0].bytes, 'PNGDATA', 'bytes forwarded verbatim');
+		const body = down.calls.replies[down.calls.replies.length - 1].content;
+		// NOTE: the alt text goes through mdLiteral, which backslash-escapes `.`
+		// and friends so a hostile file name cannot break out of the label. The URL
+		// is NOT escaped - only `( )` are percent-encoded - so assert on the URL.
+		assert.ok(
+			/!\[[^\]]*px\\?\.png[^\]]*\]\(https:\/\/forum\.imrnes\.team\/assets\/uploads\/files\/1-px\.png\)/.test(body),
+			`images render inline as markdown, got:\n${body}`
+		);
+		assert.ok(
+			body.includes('(https://forum.imrnes.team/assets/uploads/files/1-clip.mp4)'),
+			'non-image attachments become a link, not a broken image thumb'
+		);
+		assert.ok(!body.includes('![clip.mp4]'), 'a video is never emitted as a markdown image');
+		// the Discord CDN url must never leak into the forum post
+		assert.ok(!body.includes('cdn.discordapp.com'), 'no Discord CDN url in the forum body');
+		console.log('ok - attachments: downloaded, uploaded as the human, referenced by forum url');
+	}
+
+	/* ── a failing attachment must not lose the message text ───────── */
+	{
+		down.mirror.nodebb.uploadAttachment = async () => {
+			throw new Error('boom');
+		};
+		const still = await down.mirror.onDiscordMessage({
+			id: 'DM_ATT_FAIL', channelId: 'TH1', content: 'teks tetap harus masuk',
+			author: { id: 'U1', bot: false, username: 'tester' },
+			attachments: [{ url: 'https://cdn.discordapp.com/a/bad.png', name: 'bad.png', type: 'image/png' }],
+		});
+		assert.ok(still, 'the reply is still created when the upload fails');
+		const body = down.calls.replies[down.calls.replies.length - 1].content;
+		assert.ok(body.includes('teks tetap harus masuk'), 'text survives an upload failure');
+		assert.ok(!body.includes('bad.png'), 'a failed upload leaves no broken reference');
+		console.log('ok - a failed attachment upload does not drop the message');
+	}
+
 	/* ── unmapped thread ─────────────────────────────────────────────── */
+	const repliesBefore = down.calls.replies.length;
 	const orphan = await down.mirror.onDiscordMessage({
 		id: 'DM3', channelId: 'TH_UNKNOWN', content: 'hello?', author: { id: 'U1', bot: false, username: 'tester' },
 	});
 	assert.strictEqual(orphan, null, 'a thread with no tid mapping is ignored');
-	assert.strictEqual(down.calls.replies.length, 1, 'nothing posted for an unmapped thread');
+	assert.strictEqual(down.calls.replies.length, repliesBefore, 'nothing posted for an unmapped thread');
 	console.log('ok - unmapped thread does not leak into the forum');
 
 	/* ── ranking boundaries ──────────────────────────────────────────── */

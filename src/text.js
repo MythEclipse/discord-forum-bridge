@@ -129,7 +129,7 @@ function mdCode(text) {
 	 * @param {string}  opts.content   the Discord message
 	 * @param {string}  [opts.link]    permalink back to the Discord message
 	 */
-function forumPostMarkdown({ nickname, rank, content, link }) {
+function forumPostMarkdown({ nickname, rank, content, link, attachments = [] }) {
 	const lines = [];
 	lines.push(`**${mdLiteral(nickname)}**`);
 	if (rank) {
@@ -143,6 +143,21 @@ function forumPostMarkdown({ nickname, rank, content, link }) {
 	}
 	if (link) {
 		lines.push('', `[Lihat di Discord](${link.replace(/[()]/g, encodeURIComponent)})`);
+	}
+	// Attachments are uploaded to the forum first (nodebb.js uploadAttachment), so
+	// they arrive here as absolute forum URLs. Images get an inline markdown image
+	// so they render inside the quoted block; anything else becomes a plain link,
+	// because a markdown image of a video/audio file renders as a broken thumb.
+	if (attachments.length) {
+		lines.push('');
+		attachments.forEach((att) => {
+			const href = String(att.url || '').replace(/[()]/g, encodeURIComponent);
+			if (/\.(png|jpe?g|gif|webp|bmp|avif)(?:$|[?#])/i.test(href) || att.isImage) {
+				lines.push(`![${mdLiteral(att.name || 'gambar')}](${href})`);
+			} else {
+				lines.push(`[${mdLiteral(att.name || 'lampiran')}: ${href}](${href})`);
+			}
+		});
 	}
 	// The marker must stay an HTML comment: the markdown-it `html: false` path
 	// escapes `<!-- -->` to `&lt;!-- --&gt;` in stored content, and text.js

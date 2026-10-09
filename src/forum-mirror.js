@@ -242,15 +242,66 @@ class ForumMirror {
 		// to the username, and a body rank would be a duplicate for the wrong
 		// account. The rank IS still used above for the outbound Discord mirror
 		// and for the log line.
+		//
+		// Attachments are fetched and re-uploaded to the forum BEFORE the reply is
+		// created, so the body can reference the final forum URL. A file that
+		// fails to upload must not lose the text, so failures are logged and the
+		// message still posts.
+		const attachments = await this.mirrorAttachments(message, forumUid);
 		const res = await this.nodebb.replyToTopic(tid, {
-			content: this.renderForumPost({ nickname, content: message.content, link: message.url }),
+			content: this.renderForumPost({
+				nickname, content: message.content, link: message.url, attachments,
+			}),
 			asUid: forumUid || undefined,
 		});
 		this.seenDiscord.add(message.id);
 		this.log.info('discord -> forum', {
 			tid, pid: res && res.pid, discord: message.id, as: forumUid || 'bridge', rank,
+			attachments: attachments.length,
 		});
 		return res;
+	}
+
+	/**
+	 * Download every attachment of a Discord message and re-upload it to the
+	 * forum, returning `{ url, name }` entries pointing at the FORUM copies.
+	 *
+	 * Upload attribution matters: with a master token the upload runs as
+	 * `asUid`, so the file lands in that user's uploads folder and respects the
+	 * same `upload:post:image` privilege the reply itself does. Without it the
+	 * bridge account would silently become the owner of everyone's files.
+	 */
+	async mirrorAttachments(message, forumUid) {
+		// discord.js hands over a Collection (iterable, with `.size`), not an
+		// array, so normalise before slicing - otherwise `list.slice` is undefined.
+		const list = message.attachments
+			? Array.from(message.attachments.values ? message.attachments.values() : message.attachments)
+			: [];
+		if (!list.length) {
+			return [];
+		}
+		const limit = Number(this.config.discord.maxAttachments || 5);
+		const out = [];
+		for (const att of list.slice(0, limit)) {
+			const url = (att && att.url) || null;
+			if (!url) {
+				continue;
+			}
+			try {
+				// eslint-disable-next-line no-await-in-loop
+				const buf = await this.nodebb.downloadBinary(url);
+				// eslint-disable-next-line no-await-in-loop
+				const uploaded = await this.nodebb.uploadAttachment(
+					buf, (att.name || 'attachment'), { asUid: forumUid || undefined, contentType: att.type }
+				);
+				out.push({ url: uploaded.url, name: uploaded.name });
+			} catch (err) {
+				this.log.warn('attachment upload failed', {
+					discord: message.id, file: att.name, err: err.message,
+				});
+			}
+		}
+		return out;
 	}
 
 	/**
@@ -334,8 +385,8 @@ class ForumMirror {
 		].join('\n');
 	}
 
-	renderForumPost({ nickname, rank, content, link }) {
-		return forumPostMarkdown({ nickname, rank, content, link });
+	renderForumPost({ nickname, rank, content, link, attachments }) {
+		return forumPostMarkdown({ nickname, rank, content, link, attachments });
 	}
 
 	/* ───────────────────────────── poll loop ───────────────────────────── */

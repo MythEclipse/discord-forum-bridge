@@ -20,6 +20,7 @@
 
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const { URL } = require('url');
 
 class NodebbError extends Error {
@@ -31,11 +32,17 @@ class NodebbError extends Error {
 	}
 }
 
-function request(method, url, { token, body, headers = {} } = {}) {
+function request(method, url, { token, body, contentType, headers = {} } = {}) {
 	return new Promise((resolve, reject) => {
 		const target = new URL(url);
 		const lib = target.protocol === 'http:' ? http : https;
-		const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+		// A Buffer body is already encoded (multipart uploads); anything else is
+		// JSON. `payload.length` is only valid on a Buffer, which is why this must
+		// not go through JSON.stringify unconditionally.
+		const payload = body === undefined || body === null
+			? null
+			: (Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body)));
+		const type = contentType || 'application/json';
 		const req = lib.request({
 			method: method,
 			hostname: target.hostname,
@@ -45,7 +52,7 @@ function request(method, url, { token, body, headers = {} } = {}) {
 				Authorization: `Bearer ${token}`,
 				Accept: 'application/json',
 			}, payload ? {
-				'Content-Type': 'application/json',
+				'Content-Type': type,
 				'Content-Length': payload.length,
 			} : {}, headers),
 		}, (res) => {
@@ -119,6 +126,92 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 		// the forum. Registered by the rank plugin, so it 404s if the plugin is
 		// missing; callers must fall back to the built-in ladder.
 		getRankLadder: () => request('GET', `${url}/api/imrnes-ranks/levels`, {}),
+
+		/**
+		 * Fetch an absolute URL as raw bytes.
+		 *
+		 * Discord CDN attachment links are unauthenticated and expire, so the
+		 * bytes must be pulled while the message is being handled rather than
+		 * stored. Returns a Buffer; JSON is NOT attempted, because the caller
+		 * wants to forward the bytes verbatim to the forum's upload endpoint.
+		 */
+		downloadBinary(absoluteUrl) {
+			return new Promise((resolve, reject) => {
+				let target;
+				try {
+					target = new URL(absoluteUrl);
+				} catch (err) {
+					return reject(err);
+				}
+				const lib = target.protocol === 'http:' ? http : https;
+				const req = lib.request({
+					method: 'GET',
+					hostname: target.hostname,
+					port: target.port || (target.protocol === 'http:' ? 80 : 443),
+					path: `${target.pathname}${target.search}`,
+					headers: { Accept: '*/*' },
+				}, (res) => {
+					// One redirect hop is enough for Discord's CDN.
+					if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+						res.resume();
+						return resolve(this.downloadBinary(new URL(res.headers.location, absoluteUrl).toString()));
+					}
+					const chunks = [];
+					res.on('data', (c) => chunks.push(c));
+					res.on('error', reject);
+					res.on('end', () => {
+						if (res.statusCode >= 400) {
+							return reject(new NodebbError(res.statusCode, 'binary download failed', absoluteUrl));
+						}
+						return resolve(Buffer.concat(chunks));
+					});
+				});
+				req.on('error', reject);
+				req.end();
+			});
+		},
+
+		// POST <url>/api/v3/bridge-upload  (multipart/form-data, field `files[]`)
+		//
+		// NodeBB's Write API v3 has NO upload endpoint - `src/api/files.js` only
+		// exposes `delete` and `createFolder`, and the `PUT /api/v3/files` route
+		// is commented out in `src/routes/write/files.js`. The only other route,
+		// `POST /api/post/upload`, cannot be driven by an API token at all: it has
+		// no `authenticateRequest` in its chain, so `req.uid` is always 0 and
+		// `privileges.global.can('upload:post:image', 0)` fails -> 403.
+		//
+		// `nodebb-plugin-bridge-upload` supplies an authenticated route built with
+		// `routeHelpers.setupApiRoute`, which does include `authenticateRequest`.
+		//
+		// Written as a raw multipart body because the client has no dependency and
+		// NodeBB expects the literal field name `files[]`.
+		uploadAttachment(buffer, filename, { asUid, contentType } = {}) {
+			const target = authMode === 'master' ? withUid('/bridge-upload', asUid || actorUid) : '/bridge-upload';
+			const boundary = `----hermesbridge${Date.now().toString(16)}${crypto.randomBytes(6).toString('hex')}`;
+			const name = String(filename || 'upload.bin').replace(/["\\\r\n]/g, '_');
+			const head = Buffer.from(
+				`--${boundary}\r\n`
+				+ `Content-Disposition: form-data; name="files[]"; filename="${name}"\r\n`
+				+ `Content-Type: ${contentType || 'application/octet-stream'}\r\n\r\n`,
+				'utf8'
+			);
+			const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+			return request('POST', `${base}${target}`, {
+				token: apiToken,
+				body: Buffer.concat([head, Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || ''), tail]),
+				contentType: `multipart/form-data; boundary=${boundary}`,
+			}).then((res) => {
+				const payload = (res && typeof res === 'object' && 'response' in res) ? res.response : res;
+				const image = payload && Array.isArray(payload.images) ? payload.images[0] : null;
+				if (!image || !image.url) {
+					throw new NodebbError(502, res, `${url}/api/v3/bridge-upload`);
+				}
+				return {
+					url: `${url}${image.url}`,
+					name: image.name || name,
+				};
+			});
+		},
 
 		// GET /api/v3/config
 		getConfig: () => call('GET', '/config'),

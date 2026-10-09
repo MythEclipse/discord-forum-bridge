@@ -63,6 +63,9 @@ function buildConfig() {
 		guildId: required('DISCORD_GUILD_ID'),
 		channelId: required('DISCORD_CHANNEL_ID'),
 		botUserId: env.DISCORD_BOT_USER_ID || '',
+		// Cap on attachments mirrored Discord -> forum per message. Each file is
+		// downloaded and re-uploaded, so this bounds the work one message can cause.
+		maxAttachments: Number(env.DISCORD_MAX_ATTACHMENTS || 5),
 	},
 	nodebb: {
 		url: (env.NODEBB_URL || 'https://forum.imrnes.team').replace(/\/+$/, ''),
