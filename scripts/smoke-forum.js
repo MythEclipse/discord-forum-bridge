@@ -268,6 +268,32 @@ function makeMirror(overrides = {}) {
 	assert.strictEqual(idn.rankTitleFor(999), '[Pathfinder]', 'beyond the ladder');
 	console.log('ok - rank boundaries with an array ladder');
 
+	/* ── webhook failure must be remembered ──────────────────────────────
+	 * Creating a webhook in a channel without MANAGE_WEBHOOKS always fails with
+	 * `Unknown Channel`. Without a negative cache entry the bridge retried the
+	 * doomed request on EVERY mirrored post, emitting one WARN per message.
+	 */
+	const { DiscordTransport } = require('../src/discord-transport');
+	const fakeCfg = {
+		discord: { botToken: 'x', appId: 'y' },
+	};
+	const transport = new DiscordTransport(fakeCfg);
+	let createAttempts = 0;
+	transport.rest.get = async () => { throw new Error('Unknown Channel'); };
+	transport.rest.post = async (route) => {
+		if (String(route).includes('/webhooks')) {
+			createAttempts += 1;
+			throw new Error('Unknown Channel');
+		}
+		return {};
+	};
+	transport.onLog = () => {};
+	for (let i = 0; i < 5; i += 1) {
+		assert.strictEqual(await transport.ensureWebhook('C1', 'n'), null, 'falls back to a plain bot message');
+	}
+	assert.strictEqual(createAttempts, 1, `webhook creation attempted once, not per message (got ${createAttempts})`);
+	console.log('ok - webhook failure is cached, not retried per message');
+
 	restoreState();
 	console.log('\nALL FORUM-MODE TESTS PASSED');
 })().catch((err) => {

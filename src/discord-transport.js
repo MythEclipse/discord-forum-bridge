@@ -13,6 +13,13 @@
 
 const { Client, GatewayIntentBits, Partials, WebhookClient, REST } = require('discord.js');
 
+/**
+ * Sentinel cached in `webhookCache` for channels where webhook creation is
+ * known to fail (missing MANAGE_WEBHOOKS). Distinct from a webhook object so the
+ * fast path can tell "resolved" from "known impossible".
+ */
+const NO_WEBHOOK = Symbol('no-webhook');
+
 class DiscordTransport {
 	constructor(config) {
 		this.config = config;
@@ -172,6 +179,12 @@ class DiscordTransport {
 
 	async ensureWebhook(channelId, name, avatar) {
 		const cached = this.webhookCache.get(channelId);
+		// A channel we already failed to create a webhook in is cached as a
+		// sentinel. Without this, `POST /channels/<id>/webhooks` is retried on
+		// EVERY mirrored post, producing one WARN per message forever.
+		if (cached === NO_WEBHOOK) {
+			return null;
+		}
 		if (cached) {
 			if (avatar) {
 				try {
@@ -213,6 +226,8 @@ class DiscordTransport {
 		});
 
 		if (!created) {
+			// Cache the failure so the next post skips the doomed request.
+			this.webhookCache.set(channelId, NO_WEBHOOK);
 			return null;
 		}
 		this.webhookCache.set(channelId, created);
