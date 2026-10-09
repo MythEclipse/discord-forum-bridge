@@ -147,18 +147,8 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 		//
 		// Both start AND stop are required: omitting stop returns zero topics,
 		// which looks exactly like "this category is empty".
-		getCategoryTopics: (cid, { from = 0, to = 50 } = {}) =>
-			call('GET', `/categories/${encodeURIComponent(cid)}/topics?start=${from}&stop=${to}`),
-
 		// GET /api/v3/topics/<tid>
 		getTopic: (tid) => call('GET', `/topics/${encodeURIComponent(tid)}`),
-
-		// GET /api/v3/categories/<cid>/topics?start=&stop=
-		//
-		// Both start AND stop are required: omitting stop returns zero topics,
-		// which looks exactly like "this category is empty".
-		getCategoryTopics: (cid, { from = 0, to = 50 } = {}) =>
-			call('GET', `/categories/${encodeURIComponent(cid)}/topics?start=${from}&stop=${to}`),
 
 		/**
 		 * Posts of a topic, as RAW stored HTML.
@@ -210,13 +200,17 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 			return call('POST', '/topics', payload);
 		},
 
-		// POST /api/v3/topics/<tid>/posts { content, _uid }
+		// POST /api/v3/topics/<tid> { content, _uid }
+		//
+		// NOT `/topics/<tid>/posts` - that path does not exist and answers 404
+		// "Invalid API call". src/routes/write/topics.js registers the reply as
+		// `post /:tid` on the topics router, so the reply URL is the topic URL.
 		replyToTopic: (tid, { content }) => {
 			const payload = { content };
 			if (authMode === 'master') {
 				payload._uid = actorUid;
 			}
-			return call('POST', `/topics/${encodeURIComponent(tid)}/posts`, payload);
+			return call('POST', `/topics/${encodeURIComponent(tid)}`, payload);
 		},
 
 		// GET /api/v3/posts/<pid>  -> RAW html, comments intact.
@@ -226,6 +220,19 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 		// `&lt;!-- channel:x --&gt;` and any comment-based marker search silently
 		// fails. v3 returns the stored value untouched.
 		getPost: (pid) => call('GET', `/posts/${encodeURIComponent(pid)}`),
+
+		/**
+		 * Topics in a category.
+		 *
+		 * `lastposttime` is MILLISECONDS in the v3 write API (not seconds, unlike
+		 * some v1 fields), and `user` carries the author's username for the
+		 * thread intro. Both start and stop are required.
+		 */
+		listCategoryTopics: (cid, { from = 0, to = 50 } = {}) =>
+			call('GET', `/categories/${encodeURIComponent(cid)}/topics?start=${from}&stop=${to}`),
+
+		// GET /api/v3/users/<uid>
+		getUser: (uid) => call('GET', `/users/${encodeURIComponent(uid)}`),
 
 		// GET /api/v3/users/username/<username>  -> resolved user object
 		getUserByUsername: (username) =>

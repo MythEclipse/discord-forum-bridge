@@ -6,10 +6,11 @@
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
-    "check": "node --check src/main.js && node --check src/bridge.js && node --check src/nodebb.js && node --check src/identity.js && node --check src/config.js && node scripts/smoke.js",
+    "check": "node --check src/main.js && node --check src/forum-mirror.js && node --check src/discord-transport.js && node --check src/text.js && node --check src/nodebb.js && node scripts/smoke-forum.js",
     "probe:forum": "node scripts/probe-forum.js",
     "invite": "node scripts/invite-url.js",
-    "probe:restart": "node scripts/probe-restart.js"
+    "probe:restart": "node scripts/probe-restart.js",
+    "check:forum": "node scripts/smoke-forum.js"
   },
   "engines": {
     "node": ">=20"

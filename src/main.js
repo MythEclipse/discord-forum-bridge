@@ -1,160 +1,133 @@
 'use strict';
 
 /**
- * Discord <-> forum.imrnes.team bridge.
+ * Discord <-> forum.imrnes.team bridge (forum mode).
  *
- * Requires DISCORD_BOT_TOKEN (Bot page in the Developer Portal). The OAuth2
- * client secret cannot log a bot in - it only authorises OAuth2 grants and
- * application-command updates.
+ * One NodeBB topic in the bridged category becomes one Discord thread; every
+ * reply in that thread becomes a forum post, and every new forum post becomes a
+ * thread reply. Both directions carry the author's forum rank.
+ *
+ * Requires DISCORD_BOT_TOKEN (the Bot page in the Developer Portal). A client
+ * secret cannot log a bot in - it only authorises OAuth2 grants.
  */
 
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
-const { config } = require('./config');
+const { config, loadNodebbConfig } = require('./config');
 const { createClient } = require('./nodebb');
-const { Bridge } = require('./bridge');
+const { DiscordTransport } = require('./discord-transport');
+const { ForumMirror } = require('./forum-mirror');
+const { IdentityStore } = require('./identity');
 const log = require('./log');
 
-if (!config.discord.botToken) {
-	log.error('DISCORD_BOT_TOKEN missing - see README "Generate the bot token"');
-	process.exit(1);
-}
-
-const discord = new Client({
-	intents: [
-		GatewayIntentBits.Guilds,
-		GatewayIntentBits.GuildMessages,
-		GatewayIntentBits.MessageContent,
-		GatewayIntentBits.GuildMembers,
-	],
-	partials: [Partials.Channel],
-});
-
-const nodebb = createClient(config.nodebb);
-const bridge = new Bridge({ discord: null, nodebb, config });
-
-const transport = {
-	async send({ channelId, content }) {
-		const channel = await discord.channels.fetch(channelId);
-		if (!channel || !channel.isTextBased()) {
-			throw new Error(`channel ${channelId} is not text based`);
-		}
-		return channel.send(content);
-	},
-};
-bridge.discord = transport;
-
-// guild member cache -> forum postcount lookup, so rank reflects the forum
-async function enrichMember(member) {
-	if (!member || !member.user) {
-		return null;
-	}
-	const nickname = member.displayName || member.user.username;
-	const link = bridge.identity.findByDiscordId(member.id) || bridge.identity.findByUsername(nickname);
-	if (!link || !link.username) {
-		return {
-			id: member.id,
-			nickname: nickname,
-			user: member.user,
-			forumPostcount: 0,
-			forumUsername: null,
-		};
-	}
-	try {
-		const forumUser = await nodebb.getUserByUsername(link.username);
-		return {
-			id: member.id,
-			nickname: nickname,
-			user: member.user,
-			forumPostcount: forumUser ? parseInt(forumUser.postcount, 10) || 0 : 0,
-			forumUsername: forumUser ? forumUser.username : link.username,
-		};
-	} catch (err) {
-		return { id: member.id, nickname: nickname, user: member.user, forumPostcount: 0, forumUsername: link.username };
-	}
-}
-
-let pollTimer = null;
-
-discord.once('ready', async () => {
-	bridge.setBotUserId(discord.user.id);
-	log.info('discord ready', { tag: discord.user.tag, id: discord.user.id });
-
-	const channel = await discord.channels.fetch(config.discord.channelId);
-	if (!channel) {
-		log.error('target channel not found', config.discord.channelId);
+async function main() {
+	if (!config.discord.botToken) {
+		log.error('DISCORD_BOT_TOKEN missing - Developer Portal -> your app -> Bot -> Reset Token');
 		process.exit(1);
 	}
-	log.info('mirroring channel', `${channel.name} (${channel.id})`);
 
-	await bridge.loadRankLadder();
-	await bridge.ensureTopic();
+	const nodebb = createClient(loadNodebbConfig());
+	const identity = new IdentityStore();
 
-	// start from the newest post so a restart never replays history
-	let lastPid = 0;
+	// Verify the forum credentials BEFORE connecting to Discord, so a bad forum
+	// token fails fast with a forum error instead of a confusing Discord timeout.
+	const probe = await nodebb.probe();
+	log.info('nodebb api ready', { authMode: probe.authMode, uid: probe.actorUid });
+
 	try {
-		const res = await nodebb.getTopicPosts(bridge.topicId);
-		const posts = (res && res.posts) || [];
-		lastPid = posts.reduce((max, p) => Math.max(max, Number(p.pid) || 0), 0);
-		log.info('forum sync cursor', { lastPid });
+		const ladder = await nodebb.getRankLadder();
+		if (ladder && Array.isArray(ladder.levels) && ladder.levels.length) {
+			identity.setLadder(ladder.levels);
+			log.info('rank ladder loaded', { levels: identity.ladder.length });
+		}
 	} catch (err) {
-		log.warn('could not seed forum cursor', err.message);
+		log.warn('rank ladder unavailable, using defaults', err.message);
 	}
 
-	const poll = async () => {
-		try {
-			const res = await nodebb.getTopicPosts(bridge.topicId);
-			const posts = (res && res.posts) || [];
-			for (const post of posts) {
-				lastPid = Math.max(lastPid, Number(post.pid) || 0);
-				await bridge.onForumReply(post, { postcount: 0 });
-			}
-		} catch (err) {
-			log.warn('forum poll failed', err.message);
-		}
+	const discord = new DiscordTransport(config);
+	discord.onLog = (level, message, fields) => {
+		const fn = log[level] || log.info;
+		fn(message, fields);
 	};
 
-	pollTimer = setInterval(poll, config.behaviour.syncIntervalMs);
-	setInterval(() => bridge.loadRankLadder(), config.behaviour.raceSyncIntervalMs);
-	log.info('bridge running', { intervalMs: config.behaviour.syncIntervalMs });
-});
+	const mirror = new ForumMirror({ nodebb, discord, config, identity, log });
 
-discord.on('messageCreate', async (message) => {
-	if (message.channel.id !== config.discord.channelId) {
-		return;
+	await discord.login();
+	mirror.setBotUserId(discord.botUserId);
+	log.info('discord ready', { tag: discord.client.user.tag, id: discord.botUserId });
+
+	await mirror.start();
+
+	// Every existing topic gets its thread, once. Set FORUM_BACKFILL=0 to skip.
+	if (String(config.forum.backfill) !== '0') {
+		await mirror.backfill();
 	}
-	try {
-		if (message.content.startsWith('!link ')) {
-			const username = message.content.slice(6).trim();
-			const forumUser = await nodebb.getUserByUsername(username);
-			if (!forumUser || !forumUser.username) {
-				await message.reply(`Forum user \`${username}\` tidak ditemukan.`);
+
+	const syncMs = config.behaviour.syncIntervalMs;
+	const poll = setInterval(() => {
+		mirror.pollOnce().catch((err) => log.warn('poll failed', err.message));
+	}, syncMs);
+	const ladderSync = setInterval(() => {
+		nodebb.getRankLadder()
+			.then((res) => {
+				if (res && Array.isArray(res.levels) && res.levels.length) {
+					identity.setLadder(res.levels);
+					log.info('rank ladder refreshed', { levels: identity.ladder.length });
+				}
+			})
+			.catch((err) => log.warn('rank ladder refresh failed', err.message));
+	}, config.behaviour.raceSyncIntervalMs);
+
+	log.info('bridge running', {
+		channel: config.discord.channelId, cid: mirror.cid, mode: mirror.mode, syncMs,
+	});
+
+	discord.client.on('messageCreate', async (message) => {
+		try {
+			if (message.content.startsWith('!link ')) {
+				await handleLink(message);
 				return;
 			}
-			bridge.identity.setLink(message.author.id, {
-				discordId: message.author.id,
-				discordTag: message.author.tag,
-				username: forumUser.username,
-				uid: forumUser.uid,
-			});
-			await message.reply(`Terhubung: Discord \`${message.author.tag}\` <-> forum \`${forumUser.username}\` (${forumUser.postcount} posts).`);
-			log.info('identity linked', { discordId: message.author.id, username: forumUser.username });
+			// Only replies inside a mirrored thread become forum posts. A new
+			// top-level post in the forum channel is not a reply to any topic, so
+			// the poller creates the thread instead.
+			if (mirror.threadToTopic.has(message.channelId)) {
+				await mirror.onDiscordMessage(message);
+			}
+		} catch (err) {
+			log.error('discord message failed', err.message);
+		}
+	});
+
+	discord.client.on('error', (err) => log.error('discord client error', err.message));
+	process.on('unhandledRejection', (err) => log.error('unhandled rejection', err && err.message));
+
+	const shutdown = () => {
+		clearInterval(poll);
+		clearInterval(ladderSync);
+		log.info('shutting down');
+		process.exit(0);
+	};
+	process.on('SIGTERM', shutdown);
+	process.on('SIGINT', shutdown);
+
+	async function handleLink(message) {
+		const username = message.content.slice(6).trim();
+		const forumUser = await nodebb.getUserByUsername(username);
+		if (!forumUser || !forumUser.username) {
+			await message.reply(`Forum user \`${username}\` tidak ditemukan.`);
 			return;
 		}
-		await bridge.onDiscordMessage(message, await enrichMember(message.member));
-	} catch (err) {
-		log.error('discord message failed', err.message);
+		identity.setLink(message.author.id, {
+			discordId: message.author.id,
+			discordTag: message.author.tag,
+			username: forumUser.username,
+			uid: forumUser.uid,
+		});
+		await message.reply(`Terhubung: Discord \`${message.author.tag}\` <-> forum \`${forumUser.username}\` (${forumUser.postcount} posts).`);
+		log.info('identity linked', { discordId: message.author.id, username: forumUser.username });
 	}
-});
+}
 
-discord.on('error', (err) => log.error('discord client error', err.message));
-process.on('unhandledRejection', (err) => log.error('unhandled rejection', err && err.message));
-process.on('SIGTERM', () => {
-	if (pollTimer) clearInterval(pollTimer);
-	log.info('shutting down');
-	process.exit(0);
-});
-
-discord.login(config.discord.botToken).catch((err) => {
-	log.error('discord login failed', err.message);
+main().catch((err) => {
+	log.error('fatal', err.message);
 	process.exit(1);
 });

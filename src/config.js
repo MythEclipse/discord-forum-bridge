@@ -74,13 +74,15 @@ function buildConfig() {
 		bridgeUid: env.NODEBB_BRIDGE_UID || '',
 	},
 	forum: {
-		categorySlug: env.FORUM_CATEGORY_SLUG || 'discord-bridge',
-		topicPrefix: env.FORUM_TOPIC_PREFIX || 'DISCORD',
+		categorySlug: env.FORUM_CATEGORY_SLUG || 'general-discussion',
+		// '1' creates a Discord thread for every existing topic at boot. Set to
+		// '0' to only mirror topics that get activity after start.
+		backfill: env.FORUM_BACKFILL || '1',
 	},
 	behaviour: {
 		syncIntervalMs: num('SYNC_INTERVAL_SECONDS', 20) * 1000,
 		raceSyncIntervalMs: num('RANK_SYNC_INTERVAL_SECONDS', 300) * 1000,
-		marker: env.BRIDGE_MARKER || '<!-- discord-bridge -->',
+		marker: env.BRIDGE_MARKER || '<!-- imrnes-bridge -->',
 	},
 	});
 }
