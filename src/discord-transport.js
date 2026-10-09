@@ -85,6 +85,52 @@ class DiscordTransport {
 	 * Discord requires the starter message to be non-empty for forum channels, so
 	 * a caller-provided intro doubles as the reason the thread exists.
 	 */
+	/**
+	 * List a channel's threads via REST.
+	 *
+	 * discord.js keeps its own thread cache, and `channel.threads.fetch()` does
+	 * not reliably return threads the bot did not just create - exactly the case
+	 * here, since the thread being looked for was made by an earlier run. So go
+	 * to the source.
+	 *
+	 * The endpoint is channel-type specific, and picking the wrong one fails
+	 * loudly rather than returning empty (verified live on a type 15 GuildForum):
+	 *   - GuildForum / GuildMedia: `GET /channels/<id>/threads/search`
+	 *     `GET /channels/<id>/threads` returns **405 Method Not Allowed**.
+	 *   - plain text: `GET /channels/<id>/threads/active`
+	 *     `/threads/search` returns 404 there.
+	 *
+	 * `/threads/search` also rejects `limit > 25` (code 50035,
+	 * NUMBER_TYPE_MAX), so the page size is clamped rather than trusted.
+	 */
+	async listThreads(channelId, { before, includeArchived = false } = {}) {
+		const channel = await this.resolveChannel(channelId);
+		const isForum = channel && (channel.type === 15 || channel.type === 16);
+		const limit = 25;
+		const query = new URLSearchParams({
+			archived_public: String(includeArchived),
+			archived_private: String(includeArchived),
+			limit: String(limit),
+		});
+		if (isForum) {
+			// `/threads/search` paginates with `total`, not `before`.
+			const data = await this.rest.get(
+				`/channels/${channelId}/threads/search?${query}`
+			);
+			const threads = (data && data.threads) || [];
+			return {
+				threads,
+				hasMore: threads.length >= limit,
+			};
+		}
+		if (before) {
+			query.set('before', before);
+		}
+		const data = await this.rest.get(`/channels/${channelId}/threads/active?${query}`);
+		const threads = (data && data.threads) || [];
+		return { threads, hasMore: threads.length >= limit };
+	}
+
 	async createThread(parentId, { name, message }) {
 		if (!message || !String(message).trim()) {
 			throw new Error('createThread needs a starter message for forum channels');

@@ -130,11 +130,37 @@ class ForumMirror {
 
 	/* ───────────────────────── thread mapping ──────────────────────────── */
 
+	/**
+	 * Resolve the Discord thread for a forum topic, REBUILDING the mapping from
+	 * Discord itself before ever creating a new thread.
+	 *
+	 * `state.json` is the fast path, but it is also the only source of truth if
+	 * nothing else is consulted - and it lives outside the repo, so a container
+	 * rebuild, a wiped volume, or a hand-restart silently loses it. The previous
+	 * behaviour was "no mapping -> create a thread", which is precisely wrong for
+	 * a forum-style channel: a second thread for the same topic appears, the
+	 * users keep typing in the OLD one (its name is identical), and the bridge
+	 * ignores them because `threadToTopic` only knows the new id. Symptom:
+	 * "posting in Discord does nothing", forum -> Discord still works.
+	 *
+	 * The thread NAME is the durable backlink: `threadNameFor()` always prefixes
+	 * `[t:<tid>]`, so a lost state.json can be rebuilt from Discord alone with no
+	 * DB change. `findThreadByTid` looks that up and re-adopts the existing
+	 * thread; a genuinely new topic still gets a new thread.
+	 */
 	async ensureThread(topic) {
 		const tid = String(topic.tid);
 		const known = this.topicToThread.get(tid);
 		if (known) {
 			return known;
+		}
+		const adopted = await this.findThreadByTid(tid);
+		if (adopted) {
+			this.topicToThread.set(tid, adopted.id);
+			this.threadToTopic.set(adopted.id, tid);
+			await this.persistState();
+			this.log.info('re-adopted existing discord thread', { tid, thread: adopted.id });
+			return adopted.id;
 		}
 		const name = this.threadNameFor(topic);
 		const created = await this.discord.createThread(this.config.discord.channelId, {
@@ -146,6 +172,48 @@ class ForumMirror {
 		await this.persistState();
 		this.log.info('created discord thread', { tid, thread: created.id });
 		return created.id;
+	}
+
+	/**
+	 * Find an existing thread for `tid` by scanning the forum channel's threads
+	 * for the `[t:<tid>]` prefix `threadNameFor()` writes.
+	 *
+	 * Cached per tid because `backfill()` calls `ensureThread()` for every topic
+	 * in the category and Discord's thread listing is paginated. Archived threads
+	 * are skipped unless `includeArchived`, since writing into an archived thread
+	 * fails and re-using one would look like a silent dead channel to the user.
+	 */
+	async findThreadByTid(tid, { includeArchived = false } = {}) {
+		const stamp = `[t:${tid}]`;
+		const seen = new Set();
+		let before = undefined;
+		// Discord returns archived threads only when `includeArchived` is set, and
+		// the listing is capped, so page until exhausted or the stamp is found.
+		for (let page = 0; page < 20; page += 1) {
+			// eslint-disable-next-line no-await-in-loop
+			const batch = await this.discord.listThreads(this.config.discord.channelId, {
+				before, includeArchived,
+			});
+			const items = (batch && batch.threads) || [];
+			if (!items.length) {
+				return null;
+			}
+			for (const th of items) {
+				if (!th || seen.has(th.id)) {
+					continue;
+				}
+				seen.add(th.id);
+				if (String(th.name || '').startsWith(stamp)) {
+					return th;
+				}
+			}
+			before = items[items.length - 1].id;
+			// Discord caps `/threads/search` at 25 per page.
+			if (items.length < 25) {
+				return null;
+			}
+		}
+		return null;
 	}
 
 	/**

@@ -94,6 +94,9 @@ function makeMirror(overrides = {}) {
 			calls.threads.push({ parentId, name, message, id });
 			return { id, name };
 		},
+		// Reports whatever `existingThreads` the test declares, so the re-adopt
+		// path can be exercised without a real Discord client.
+		listThreads: async () => ({ threads: overrides.existingThreads || [], hasMore: false }),
 		sendToThread: async (threadId, payload) => { calls.sent.push({ threadId, ...payload }); },
 		fetchMember: async (id) => (overrides.members?.[id] || { id, displayName: 'tester', user: { username: 'tester' } }),
 	};
@@ -203,13 +206,35 @@ function makeMirror(overrides = {}) {
 	assert.strictEqual(second.calls.threads.length, 0, 'no createThread calls at all');
 	console.log('ok - restart reuses the persisted tid->thread map');
 
-	/* ── lost state is recovered from the thread name ────────────────── */
+	/* ── lost state is recovered from the thread NAME ───────────────── */
+	// Regression: a lost state.json used to make backfill() create a SECOND thread
+	// for the same topic. Users kept typing in the old one (identical name) and
+	// the bridge ignored them, so Discord -> forum silently stopped working.
 	resetState();
-	const third = makeMirror();
-	await third.mirror.start();
-	await third.mirror.backfill();
-	assert.strictEqual(third.calls.threads.length, 2, 'with no state it rebuilds from scratch once');
-	console.log('ok - lost state does not crash; rebuilds deterministically');
+	const readopted = makeMirror({
+		existingThreads: [
+			{ id: 'OLD_T1', name: '[t:1] Selamat Datang Shounen - Welcome Shounen' },
+			{ id: 'OLD_T2', name: '[t:2] Rules' },
+		],
+	});
+	await readopted.mirror.start();
+	await readopted.mirror.backfill();
+	assert.strictEqual(readopted.calls.threads.length, 0, 'no duplicate thread is created');
+	assert.strictEqual(readopted.mirror.topicToThread.get('1'), 'OLD_T1', 'topic 1 re-adopts the existing thread');
+	assert.strictEqual(readopted.mirror.threadToTopic.get('OLD_T1'), '1', 'the reverse map points back, so replies route');
+	assert.strictEqual(readopted.mirror.threadToTopic.get('OLD_T2'), '2', 'topic 2 re-adopted too');
+	console.log('ok - lost state re-adopts threads by their [t:N] name instead of duplicating');
+
+	// and a genuinely unknown topic must still get a new thread
+	resetState();
+	const mixed = makeMirror({
+		existingThreads: [{ id: 'OLD_T1', name: '[t:1] Selamat Datang Shounen - Welcome Shounen' }],
+	});
+	await mixed.mirror.start();
+	await mixed.mirror.backfill();
+	assert.strictEqual(mixed.calls.threads.length, 1, 'only the unmapped topic gets a new thread');
+	assert.strictEqual(mixed.mirror.topicToThread.get('1'), 'OLD_T1', 'topic 1 still re-adopted');
+	console.log('ok - a topic with no existing thread still creates one');
 
 	/* ── forum -> discord ────────────────────────────────────────────── */
 	resetState();
