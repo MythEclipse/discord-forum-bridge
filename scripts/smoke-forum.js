@@ -496,6 +496,39 @@ function makeMirror(overrides = {}) {
 		console.log('ok - a deleted post does not strand the posts after it');
 	}
 
+
+	/* ── forum images must survive the Discord mirror ────────────────── */
+	// Two real bugs, both silent:
+	//  1. `<i[^>]*>` has no word boundary, so it consumed a whole
+	//     `<img src="..." class="..." alt="..." />` and left a bare `*`.
+	//  2. even a matching rule only emitted the bare URL, so the GIF arrived
+	//     as unclickable text instead of an inline image.
+	{
+		const { htmlToPlainText } = require('../src/text');
+		const nodebbImg = '<p dir="auto">uji gif: '
+			+ '<img src="https://forum.imrnes.team/assets/uploads/files/1-t.gif" '
+			+ 'class="wp-image" alt="t.gif" /> halo</p>';
+		const out = htmlToPlainText(nodebbImg);
+		assert.ok(
+			/!\[[^\]]*\]\(https:\/\/forum\.imrnes\.team\/assets\/uploads\/files\/1-t\.gif\)/.test(out),
+			`a forum image becomes a markdown image, got:\n${out}`
+		);
+		assert.ok(!/\*/.test(out.replace(/![^\]]*\]/g, '')), 'no stray emphasis marker is left behind');
+		assert.ok(out.includes('uji gif:'), 'the surrounding text survives');
+		assert.ok(out.includes('halo'), 'the text after the image survives');
+
+		// emphasis must still work - the word-boundary fix must not break <i>/<em>
+		assert.strictEqual(
+			htmlToPlainText('<p><em>italic</em> dan <b>bold</b></p>'),
+			'*italic* dan **bold**',
+			'emphasis still renders'
+		);
+		// and self-closing / unquoted-ish shapes must not throw
+		assert.ok(htmlToPlainText('<p><img src="a.png" alt="x"></p>').includes('![x](a.png)'));
+		assert.strictEqual(htmlToPlainText('<p><img alt="no src"></p>'), '', 'an img with no src is dropped');
+		console.log('ok - forum images (incl. GIF) render inline in the Discord mirror');
+	}
+
 	/* ── ranking boundaries ──────────────────────────────────────────── */
 	const idn = new IdentityStore();
 	idn.setLadder([{ min: 0, name: '[Neophyte]' }, { min: 3, name: '[Apprentice]' }, { min: 10, name: '[Pathfinder]' }]);

@@ -65,14 +65,37 @@ function htmlToPlainText(html) {
 		.replace(/<\/strong>/gi, '**')
 		.replace(/<b[^>]*>/gi, '**')
 		.replace(/<\/b>/gi, '**')
-		.replace(/<em[^>]*>/gi, '*')
-		.replace(/<\/em>/gi, '*')
-		.replace(/<i[^>]*>/gi, '*')
-		.replace(/<\/i>/gi, '*')
+		// `<b`, `<i`, `<em`, `<a`, `<code` ... WITHOUT a word boundary match
+		// `<img>`, `<iframe>`, `<input>` and friends: `<i[^>]*>` happily consumes
+		// a whole `<img src=... />` and leaves a bare `*` behind. That is why the
+		// image disappeared from the Discord mirror with no error anywhere.
+		// `\b` after the tag name is the fix; the closing forms need it too so
+		// `</i>` never eats something else.
+		.replace(/<em\b[^>]*>/gi, '*')
+		.replace(/<\/em\s*>/gi, '*')
+		.replace(/<i\b[^>]*>/gi, '*')
+		.replace(/<\/i\s*>/gi, '*')
 		.replace(/<code[^>]*>/gi, '`')
 		.replace(/<\/code>/gi, '`')
 		.replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
-		.replace(/<img[^>]*src="([^"]*)"[^>]*>/gi, '\n$1\n')
+		// <img> must become a markdown image, and the attribute ORDER matters:
+		// NodeBB/markdown-it emits `<img class="..." alt="..." src="...">` with
+		// `src` LAST, so a `src="..."[^>]*` pattern never matches and the tag
+		// falls through to the generic stripper, leaving a bare `*` (from the
+		// `<em>` rule) where the image was. Match the attributes independently
+		// of their order instead.
+		//
+		// The result is markdown `![alt](url)` because Discord renders that
+		// inline; a bare URL shows up as a wall of unclickable text, and an
+		// upload the user cannot see is the same as a dropped upload.
+		.replace(/<img\b([^>]*)>/gi, (match, attrs) => {
+			const src = /\bsrc\s*=\s*["']([^"']*)["']/i.exec(attrs);
+			if (!src || !src[1]) {
+				return '';
+			}
+			const alt = /\balt\s*=\s*["']([^"']*)["']/i.exec(attrs);
+			return `\n![${mdLiteral(alt ? alt[1] : 'image')}](${src[1].replace(/[()]/g, encodeURIComponent)})\n`;
+		})
 		.replace(/<\/?(?:p|div|h[1-6]|ul|ol|table|tr)[^>]*>/gi, '\n\n')
 		.replace(/<[^>]+>/g, '')
 		.replace(/\n{3,}/g, '\n\n')
