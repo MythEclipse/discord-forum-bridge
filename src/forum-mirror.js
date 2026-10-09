@@ -29,7 +29,7 @@
  * / bot id are a second line of defence.
  */
 
-const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown } = require('./text');
+const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown, setForumUrl } = require('./text');
 const { readState, writeState } = require('./state');
 
 const TOPIC_PAGE_SIZE = 50;
@@ -81,6 +81,9 @@ function isDeletedPlaceholder(content) {
 
 class ForumMirror {
 	constructor({ nodebb, discord, config, identity, log }) {
+		// NodeBB stores uploaded-image `src` as a site-relative path, and Discord
+		// cannot resolve one, so htmlToPlainText() needs the absolute origin.
+		setForumUrl(config.nodebb.url);
 		this.nodebb = nodebb;
 		this.discord = discord;
 		this.config = config;

@@ -8,6 +8,15 @@
  * without any network or Discord connection.
  */
 
+// Absolute origin of the forum, injected by the bridge at startup. Needed to
+// absolutise the RELATIVE `src` NodeBB stores for uploaded images.
+let FORUM_URL = '';
+
+/** @param {string} url public origin of the forum, e.g. https://forum.imrnes.team */
+function setForumUrl(url) {
+	FORUM_URL = String(url || '');
+}
+
 const MARKER = '<!-- imrnes-bridge -->';
 
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -94,7 +103,15 @@ function htmlToPlainText(html) {
 				return '';
 			}
 			const alt = /\balt\s*=\s*["']([^"']*)["']/i.exec(attrs);
-			return `\n![${mdLiteral(alt ? alt[1] : 'image')}](${src[1].replace(/[()]/g, encodeURIComponent)})\n`;
+			// NodeBB stores `src` RELATIVE (`/assets/uploads/files/...`) when the
+			// post was written from the composer. Discord cannot resolve a relative
+			// url - it renders as a broken image - so an absolute origin is required.
+			// `FORUM_URL` is set once at startup from config.
+			let href = src[1];
+			if (/^\//.test(href)) {
+				href = `${String(FORUM_URL || '').replace(/\/+$/, '')}${href}`;
+			}
+			return `\n![${mdLiteral(alt ? alt[1] : 'image')}](${href.replace(/[()]/g, encodeURIComponent)})\n`;
 		})
 		.replace(/<\/?(?:p|div|h[1-6]|ul|ol|table|tr)[^>]*>/gi, '\n\n')
 		.replace(/<[^>]+>/g, '')
@@ -190,5 +207,5 @@ function forumPostMarkdown({ nickname, rank, content, link, attachments = [] }) 
 }
 
 module.exports = {
-	MARKER, htmlEscape, mdEscape, mdLiteral, mdCode, webhookSafe, htmlToPlainText, forumPostMarkdown,
+	MARKER, setForumUrl, htmlEscape, mdEscape, mdLiteral, mdCode, webhookSafe, htmlToPlainText, forumPostMarkdown,
 };

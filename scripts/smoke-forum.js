@@ -504,9 +504,14 @@ function makeMirror(overrides = {}) {
 	//  2. even a matching rule only emitted the bare URL, so the GIF arrived
 	//     as unclickable text instead of an inline image.
 	{
-		const { htmlToPlainText } = require('../src/text');
+		const { htmlToPlainText, setForumUrl } = require('../src/text');
+		// NodeBB stores image `src` relative; Discord needs it absolute.
+		setForumUrl('https://forum.imrnes.team');
+		// EXACTLY how NodeBB stores a composer upload: a site-RELATIVE src, with
+		// `src` first and `class`/`alt` after it. Both halves of that used to break
+		// the mirror - the relative url AND the attribute order.
 		const nodebbImg = '<p dir="auto">uji gif: '
-			+ '<img src="https://forum.imrnes.team/assets/uploads/files/1-t.gif" '
+			+ '<img src="/assets/uploads/files/1-t.gif" '
 			+ 'class="wp-image" alt="t.gif" /> halo</p>';
 		const out = htmlToPlainText(nodebbImg);
 		assert.ok(
@@ -524,7 +529,13 @@ function makeMirror(overrides = {}) {
 			'emphasis still renders'
 		);
 		// and self-closing / unquoted-ish shapes must not throw
-		assert.ok(htmlToPlainText('<p><img src="a.png" alt="x"></p>').includes('![x](a.png)'));
+		// a relative src must be absolutised, an absolute one left alone
+		assert.ok(
+			/!\[[^\]]*\]\(https:\/\/cdn\.example\/x\.png\)/.test(
+				htmlToPlainText('<p><img src="https://cdn.example/x.png" alt="abs"></p>')
+			),
+			'an already-absolute src is not double-prefixed'
+		);
 		assert.strictEqual(htmlToPlainText('<p><img alt="no src"></p>'), '', 'an img with no src is dropped');
 		console.log('ok - forum images (incl. GIF) render inline in the Discord mirror');
 	}
