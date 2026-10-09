@@ -29,7 +29,7 @@
  * / bot id are a second line of defence.
  */
 
-const { MARKER, htmlEscape, mdEscape, webhookSafe, htmlToPlainText } = require('./text');
+const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown } = require('./text');
 const { readState, writeState } = require('./state');
 
 const TOPIC_PAGE_SIZE = 50;
@@ -322,12 +322,7 @@ class ForumMirror {
 	}
 
 	renderForumPost({ nickname, rank, content, link }) {
-		return [
-			`<p><strong>${htmlEscape(nickname)}</strong> <span class="imrnes-rank">${htmlEscape(rank)}</span></p>`,
-			`<blockquote>${htmlEscape(String(content || '')).replace(/\n/g, '<br />')}</blockquote>`,
-			`<p><a href="${htmlEscape(link)}">Lihat di Discord</a></p>`,
-			MARKER,
-		].join('\n');
+		return forumPostMarkdown({ nickname, rank, content, link });
 	}
 
 	/* ───────────────────────────── poll loop ───────────────────────────── */

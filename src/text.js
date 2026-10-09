@@ -79,4 +79,70 @@ function htmlToPlainText(html) {
 		.trim();
 }
 
-module.exports = { MARKER, htmlEscape, mdEscape, webhookSafe, htmlToPlainText };
+/**
+ * Escape text so it survives a MARKDOWN render pass as literal text.
+ *
+ * The forum runs nodebb-plugin-markdown with `html: false`, so post content is
+ * rendered by markdown-it and raw HTML is escaped into visible tags. Anything we
+ * want to survive as TEXT must therefore be escaped for markdown, not HTML:
+ * `htmlEscape("<b>")` becomes `&lt;b&gt;` which markdown-it then prints
+ * literally as the characters `&lt;b&gt;`.
+ */
+function mdLiteral(text) {
+	return String(text || '')
+		// Backslash-escape every markdown metacharacter that markdown-it resolves
+		// OUTSIDE a code span. Inside a code span the backslash is NOT consumed,
+		// so escaping there would print a literal `\` to the reader.
+		.replace(/([\\`*_{}\[\]()#+\-.!|<>])/g, '\\$1');
+}
+
+/**
+ * Escape a value for use inside a markdown CODE SPAN (`` `rank` ``).
+ *
+ * Only ` and \ matter there. Escaping anything else (brackets, underscores)
+ * would survive as a visible backslash, because markdown-it does not process
+ * escape sequences inside code spans - verified in-container:
+ *   render('`[Appr\\entice]`') -> <code>[Appr\entice]</code>
+ */
+function mdCode(text) {
+	return String(text || '').replace(/([\\`])/g, '\\$1');
+}
+
+/**
+ * Build the markdown body for a Discord reply mirrored into a forum topic.
+ *
+ * Format notes, all forced by how the forum actually renders:
+ *  - markdown, not HTML: nodebb-plugin-markdown has `html: false`, so HTML we
+ *    send comes out escaped and double-wrapped in `<p dir="auto">`.
+ *  - no `<span class="imrnes-rank">`: the ranks plugin already injects the badge
+ *    next to the username via a theme patch, and NodeBB's sanitizer strips
+ *    `class` anyway (sanitizeConfig has no allowedClasses), so a second badge
+ *    in the body is both redundant and unstyleable.
+ *  - the rank is kept as a bold line so it still reads as a label in the post
+ *    body, in the thread view and in e-mail notifications.
+ */
+function forumPostMarkdown({ nickname, rank, content, link }) {
+	const lines = [];
+	lines.push(`**${mdLiteral(nickname)}**`);
+	if (rank) {
+		lines.push('', `\`${mdCode(rank)}\``);
+	}
+	const body = String(content || '').trim();
+	if (body) {
+		// Quote lines so the mirrored message is visually attributed to Discord.
+		// Discord's own `>` quoting becomes a blockquote, matching the old HTML.
+		lines.push('', body.split('\n').map((l) => `> ${mdLiteral(l)}`).join('\n'));
+	}
+	if (link) {
+		lines.push('', `[Lihat di Discord](${link.replace(/[()]/g, encodeURIComponent)})`);
+	}
+	// The marker must stay an HTML comment: the markdown-it `html: false` path
+	// escapes `<!-- -->` to `&lt;!-- --&gt;` in stored content, and text.js
+	// htmlToPlainText() strips both the real and the escaped form.
+	lines.push('', MARKER);
+	return lines.join('\n');
+}
+
+module.exports = {
+	MARKER, htmlEscape, mdEscape, mdLiteral, mdCode, webhookSafe, htmlToPlainText, forumPostMarkdown,
+};

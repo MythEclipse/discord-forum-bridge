@@ -15,7 +15,7 @@ const path = require('path');
 
 const { ForumMirror } = require('../src/forum-mirror');
 const { IdentityStore } = require('../src/identity');
-const { htmlToPlainText, htmlEscape, mdEscape, webhookSafe, chunkMessage } = (() => {
+const { htmlToPlainText, htmlEscape, mdEscape, webhookSafe, forumPostMarkdown, MARKER, chunkMessage } = (() => {
 	const t = require('../src/text');
 	const d = require('../src/discord-transport');
 	return { ...t, chunkMessage: d.chunkMessage };
@@ -112,6 +112,38 @@ function makeMirror(overrides = {}) {
 	assert.strictEqual(htmlToPlainText('<blockquote>quoted</blockquote>'), '> quoted', 'blockquote');
 	console.log('ok - html/markdown conversion, marker never leaks into text');
 
+	/* ── Discord -> forum body must be MARKDOWN, not HTML ───────────────
+	 * Regression guard. The forum runs nodebb-plugin-markdown with
+	 * `html: false`, so anything sent as HTML is escaped by markdown-it and
+	 * re-wrapped in `<p dir="auto">`, which rendered the bridge's blockquote
+	 * and "Lihat di Discord" link as literal tag text on the topic page.
+	 * These assertions fail if anyone reintroduces HTML bodies.
+	 */
+	const md = forumPostMarkdown({
+		nickname: 'Za', rank: '[Apprentice]', content: 'halo dari discord',
+		link: 'https://discord.com/channels/1/2/3',
+	});
+	assert.ok(!md.includes('&lt;'), 'forum body must not contain HTML entities');
+	assert.ok(!/<[a-z/][^>]*>/i.test(md.replace(MARKER, '')), `no real HTML tags: ${md}`);
+	assert.ok(!md.includes('imrnes-rank'), 'no duplicate badge markup; the theme injects it');
+	assert.ok(md.includes('**Za**'), 'nickname is bold markdown');
+	assert.ok(md.includes('`[Apprentice]`'), 'rank is inline code, brackets not escaped');
+	assert.ok(md.includes('> halo dari discord'), 'message is quoted');
+	assert.ok(md.includes('[Lihat di Discord](https://discord.com/channels/1/2/3)'), 'discord link is a markdown link');
+	assert.ok(md.includes('<!-- imrnes-bridge -->'), 'echo marker present');
+	// Discord markdown in the message must not become live formatting.
+	const tricky = forumPostMarkdown({
+		nickname: 'Arima', rank: '[Neophyte]', content: '**bold** <script>x</script>',
+		link: 'https://x/y',
+	});
+	assert.ok(tricky.includes('\\*\\*bold\\*\\*'), 'discord bold stays literal');
+	assert.ok(!tricky.includes('<script>'), 'no raw script tag can reach the post body');
+	// Rank containing markdown metacharacters must not leak formatting.
+	const nasty = forumPostMarkdown({ nickname: 'a*_b', rank: '[x]`y`', content: '', link: '' });
+	assert.ok(nasty.includes('a\\*\\_b'), 'nickname metacharacters escaped');
+	assert.ok(nasty.includes('`[x]\\`y\\``'), 'only ` and \\ escaped inside the rank code span');
+	console.log('ok - forum body is markdown-safe (html regression guarded)');
+
 	assert.strictEqual(htmlEscape('<b>&"\''), '&lt;b&gt;&amp;&quot;&#39;', 'html escape');
 	assert.strictEqual(mdEscape('a*b_c~d|e'), 'a\\*b\\_c\\~d\\|e', 'markdown escape');
 	assert.strictEqual(webhookSafe('Za@Corp!'), 'ZaCorp', 'webhook name sanitised');
@@ -200,7 +232,11 @@ function makeMirror(overrides = {}) {
 	assert.strictEqual(down.calls.replies[0].tid, '7', 'posted to the mapped topic');
 	assert.ok(down.calls.replies[0].content.includes('halo dari discord'), 'content forwarded');
 	assert.ok(down.calls.replies[0].content.includes('imrnes-bridge'), 'marker embedded in the forum post');
-	assert.ok(down.calls.replies[0].content.includes('imrnes-rank'), 'rank span included');
+	// The rank travels as a markdown code span, not an HTML <span>: the ranks
+	// plugin injects the styled badge next to the username via a theme patch,
+	// and NodeBB's sanitizer strips class attributes anyway.
+	assert.ok(down.calls.replies[0].content.includes('`[Apprentice]`') || down.calls.replies[0].content.includes('`[Neophyte]`'), 'rank included as markdown');
+	assert.ok(!down.calls.replies[0].content.includes('<span'), 'no raw HTML in the forum body');
 	console.log('ok - discord -> forum: routed to the right topic, marker + rank embedded');
 
 	// bot messages and duplicates are ignored
