@@ -97,7 +97,18 @@ function makeMirror(overrides = {}) {
 		// Reports whatever `existingThreads` the test declares, so the re-adopt
 		// path can be exercised without a real Discord client.
 		listThreads: async () => ({ threads: overrides.existingThreads || [], hasMore: false }),
-		sendToThread: async (threadId, payload) => { calls.sent.push({ threadId, ...payload }); },
+		threadExists: async (id) => !(overrides.deadThreadId && id === overrides.deadThreadId),
+		sendToThread: async (threadId, payload) => {
+			// `deadThreadId` simulates a thread deleted in Discord: writes to it
+			// fail with Discord's real 10003, anything else succeeds.
+			if (overrides.deadThreadId && threadId === overrides.deadThreadId) {
+				throw Object.assign(new Error('Unknown Channel'), { code: 10003, status: 404 });
+			}
+			if (overrides.sendError) {
+				throw overrides.sendError;
+			}
+			calls.sent.push({ threadId, ...payload });
+		},
 		fetchMember: async (id) => (overrides.members?.[id] || { id, displayName: 'tester', user: { username: 'tester' } }),
 	};
 
@@ -391,6 +402,99 @@ function makeMirror(overrides = {}) {
 	assert.strictEqual(orphan, null, 'a thread with no tid mapping is ignored');
 	assert.strictEqual(down.calls.replies.length, repliesBefore, 'nothing posted for an unmapped thread');
 	console.log('ok - unmapped thread does not leak into the forum');
+
+
+	/* ── a deleted Discord thread must self-heal ────────────────────── */
+	// Regression: the forum thread was deleted in Discord while state.json kept
+	// its id. ensureThread() trusted the cache, every send got 404 Unknown
+	// Channel, and forum -> Discord died silently while Discord -> Forum kept
+	// working (it only needs the topic cursor).
+	{
+		resetState();
+		const dead = makeMirror({
+			topics: [{ tid: 7, title: 'Diskusi IMRNES', uid: 3, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'potatochips' } }],
+			users: { 3: { uid: 3, username: 'potatochips', postcount: 25 } },
+			postsByTopic: { 7: [{ pid: 11, uid: 3, content: '<p>halo</p>' }] },
+			// the cached thread is gone: the first send to it 404s
+			deadThreadId: 'DEAD',
+		});
+		// Seed state.json with the DEAD thread so backfill() adopts it from the
+		// cache instead of creating a fresh one - that is exactly the state a
+		// real deletion leaves behind.
+		fs.writeFileSync(STATE_PATH, JSON.stringify({
+			threads: { 7: 'DEAD' },
+			topicCursors: {},
+			cid: 2,
+		}));
+		const warns = [];
+		dead.mirror.log.warn = (...a) => warns.push(JSON.stringify(a[1] || a[0]));
+		dead.mirror.log.info = () => {};
+		await dead.mirror.start();
+		const before = dead.calls.threads.length;
+		assert.strictEqual(before, 0, 'nothing created yet: the cached id is trusted first');
+		const ok = await dead.mirror.pollOnce();
+		if (ok !== 1) { console.log('DEBUG warns:', warns.join('\n')); }
+		assert.strictEqual(ok, 1, 'the post is delivered after the dead thread is replaced');
+		assert.strictEqual(dead.calls.threads.length, before + 1, 'exactly one replacement thread is created');
+		const fresh = dead.calls.threads[dead.calls.threads.length - 1];
+		assert.ok(/^\[t:7\]/.test(fresh.name), 'the replacement carries the tid prefix');
+		assert.strictEqual(dead.mirror.topicToThread.get('7'), fresh.id, 'state now points at the live thread');
+		console.log('ok - a deleted discord thread is re-created instead of failing forever');
+	}
+
+	/* ── a PERMISSION error must NOT spawn a new thread per post ─────── */
+	{
+		resetState();
+		const forbidden = makeMirror({
+			topics: [{ tid: 7, title: 'Diskusi IMRNES', uid: 3, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'potatochips' } }],
+			users: { 3: { uid: 3, username: 'potatochips', postcount: 25 } },
+			postsByTopic: { 7: [
+				{ pid: 11, uid: 3, content: '<p>halo</p>' },
+				{ pid: 12, uid: 3, content: '<p>dua</p>' },
+			] },
+			sendError: Object.assign(new Error('Missing Permissions'), { code: 50013, status: 403 }),
+		});
+		await forbidden.mirror.start();
+		await forbidden.mirror.backfill();
+		const created = forbidden.calls.threads.length;
+		await forbidden.mirror.pollOnce();
+		await forbidden.mirror.pollOnce();
+		assert.strictEqual(forbidden.calls.threads.length, created, 'a 403 never creates a new thread');
+		console.log('ok - a permission error does not spawn threads');
+	}
+
+
+	/* ── a deleted post must not wedge the rest of the topic ────────── */
+	// Regression: NodeBB returns soft-deleted posts as a literal
+	// "[[topic:post-is-deleted]]" placeholder. The bridge tried to mirror it,
+	// the send path treated it as undeliverable, the cursor stayed put - and
+	// because pollOnce only looks at posts NEWER than the cursor, every
+	// subsequent post in that topic became invisible forever. One deleted post
+	// silently killed forum -> Discord for the whole topic.
+	{
+		resetState();
+		const wedged = makeMirror({
+			topics: [{ tid: 7, title: 'Diskusi IMRNES', uid: 3, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'potatochips' } }],
+			users: { 3: { uid: 3, username: 'potatochips', postcount: 25 } },
+			postsByTopic: { 7: [
+				{ pid: 11, uid: 3, content: '<p>sebelum</p>' },
+				{ pid: 12, uid: 3, content: '[[topic:post-is-deleted]]' },
+				{ pid: 13, uid: 3, content: '<p>sesudah</p>' },
+			] },
+		});
+		await wedged.mirror.start();
+		await wedged.mirror.backfill();
+		await wedged.mirror.pollOnce();
+		const bodies = wedged.calls.sent.map((s) => s.content);
+		assert.strictEqual(wedged.calls.sent.length, 2, 'both real posts are delivered');
+		assert.ok(bodies.some((b) => b.includes('sebelum')), 'the post before the gap arrives');
+		assert.ok(bodies.some((b) => b.includes('sesudah')), 'the post AFTER the deleted one also arrives');
+		assert.ok(
+			!bodies.some((b) => b.includes('post-is-deleted')),
+			'the placeholder itself is never rendered'
+		);
+		console.log('ok - a deleted post does not strand the posts after it');
+	}
 
 	/* ── ranking boundaries ──────────────────────────────────────────── */
 	const idn = new IdentityStore();

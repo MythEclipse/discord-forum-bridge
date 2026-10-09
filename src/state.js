@@ -16,6 +16,9 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
+
+let writeCounter = 0;
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const STATE_PATH = path.join(DATA_DIR, 'state.json');
@@ -38,7 +41,12 @@ async function writeState(patch) {
 	const current = (await readState()) || {};
 	const next = Object.assign({}, current, patch, { updatedAt: new Date().toISOString() });
 	await fsp.mkdir(DATA_DIR, { recursive: true });
-	const tmp = `${STATE_PATH}.${process.pid}.tmp`;
+	// The temp name must be unique per WRITE, not per process: the poll loop
+	// and a self-healing ensureThread() can both persist inside the same tick,
+	// and with only `${process.pid}` they race for the same temp file - the
+	// loser then fails `rename` with ENOENT. Counter + random suffix makes the
+	// atomic write actually atomic under concurrency.
+	const tmp = `${STATE_PATH}.${process.pid}.${++writeCounter}.${crypto.randomBytes(4).toString('hex')}.tmp`;
 	await fsp.writeFile(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
 	await fsp.rename(tmp, STATE_PATH);
 	return next;

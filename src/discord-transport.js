@@ -86,6 +86,27 @@ class DiscordTransport {
 	 * a caller-provided intro doubles as the reason the thread exists.
 	 */
 	/**
+	 * Cheap existence probe for a thread id.
+	 *
+	 * `GET /channels/<id>` answers 404 for a deleted thread and 200 for a live
+	 * one, including an archived one (archived is readable, just not writable).
+	 * Returns false rather than throwing so callers can treat "gone" as data.
+	 */
+	async threadExists(threadId) {
+		try {
+			const data = await this.rest.get(`/channels/${threadId}`);
+			return Boolean(data && data.id);
+		} catch (err) {
+			if (err && (err.status === 404 || err.code === 10003)) {
+				return false;
+			}
+			// A transient 5xx or a network blip must not be read as "deleted" -
+			// that would make the caller re-create a thread for a live one.
+			throw err;
+		}
+	}
+
+	/**
 	 * List a channel's threads via REST.
 	 *
 	 * discord.js keeps its own thread cache, and `channel.threads.fetch()` does
