@@ -16,6 +16,7 @@
 
 const { IdentityStore } = require('./identity');
 const log = require('./log');
+const { readState, writeState } = require('./state');
 
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
@@ -48,22 +49,64 @@ class Bridge {
 		try {
 			const res = await this.nodebb.getRankLadder();
 			if (res && Array.isArray(res.levels) && res.levels.length) {
+				// setLadder throws on unusable input, so a malformed payload surfaces
+				// here instead of silently leaving the previous ladder in place.
 				this.identity.setLadder(res.levels);
 				log.info('rank ladder refreshed', `${this.identity.ladder.length} levels from forum`);
 				return;
 			}
-			log.warn('forum returned an empty ladder, keeping previous/defaults');
+			log.warn('forum returned an empty ladder, keeping the previous one');
 		} catch (err) {
-			log.warn('rank ladder fetch failed, using defaults', err.message);
+			log.warn('rank ladder fetch failed, keeping the previous ladder', err.message);
 		}
 	}
 
+	/**
+	 * Find the existing mirror topic, or create it.
+	 *
+	 * `topicId` alone is NOT enough: it is in-memory only, so every restart would
+	 * create a SECOND mirror topic and the forum would fill with duplicates. The
+	 * persisted `data/state.json` is the source of truth for the tid, and if that
+	 * is missing or stale we search the category for a topic carrying our marker.
+	 */
 	async ensureTopic() {
 		if (this.topicId) {
 			return this.topicId;
 		}
 		const title = `${this.config.forum.topicPrefix} ${this.config.discord.channelId}`;
 		const marker = `<!-- channel:${this.config.discord.channelId} -->`;
+
+		// 1) persisted state from a previous run
+		const saved = await this.loadState();
+		if (saved && saved.topicId) {
+			const existing = await this.topicExists(saved.topicId);
+			if (existing) {
+				this.topicId = saved.topicId;
+				this.topicTitle = saved.topicTitle || null;
+				log.info('resumed mirror topic from state', { tid: this.topicId });
+				return this.topicId;
+			}
+			log.warn('state pointed at a topic that no longer exists', { tid: saved.topicId });
+		}
+
+		// 2) search the category for an existing mirror topic
+		if (this.config.forum.categorySlug) {
+			try {
+				const cid = await this.resolveCategoryId();
+				if (cid !== null) {
+					const found = await this.findTopicByMarker(cid, marker);
+					if (found) {
+						this.topicId = found;
+						this.topicTitle = found;
+						await this.saveState({ topicId: this.topicId, topicTitle: this.topicTitle });
+						log.info('adopted existing mirror topic by marker', { tid: this.topicId });
+						return this.topicId;
+					}
+				}
+			} catch (err) {
+				log.warn('mirror topic search failed', err.message);
+			}
+		}
 		const intro = [
 			`<p>Mirror dari Discord channel <code>${escapeHtml(this.config.discord.channelId)}</code>.</p>`,
 			`<p>Pesan di channel ini otomatis menjadi balasan di topik ini, dan balasan di sini `
@@ -72,15 +115,7 @@ class Bridge {
 			this.config.behaviour.marker,
 		].join('\n');
 
-		let cid = null;
-		try {
-			const cat = await this.nodebb.getCategoryBySlug(this.config.forum.categorySlug);
-			if (cat && Array.isArray(cat.categories) && cat.categories.length) {
-				cid = cat.categories[0].cid;
-			}
-		} catch (err) {
-			log.warn('category lookup failed, falling back to default category', err.message);
-		}
+		const cid = await this.resolveCategoryId();
 
 		// No slug match and no fallback: the write will fail loudly rather than
 		// silently posting to an arbitrary category.
@@ -92,8 +127,87 @@ class Bridge {
 		});
 		this.topicId = created.tid;
 		this.topicTitle = created.slug || title;
+		await this.saveState({ topicId: this.topicId, topicTitle: this.topicTitle });
 		log.info('created forum topic', { tid: this.topicId, cid });
 		return this.topicId;
+	}
+
+	loadState() {
+		return readState();
+	}
+
+	saveState(patch) {
+		return writeState(patch);
+	}
+
+	async resolveCategoryId() {
+		try {
+			const cat = await this.nodebb.getCategoryBySlug(this.config.forum.categorySlug);
+			const cats = (cat && cat.categories) || [];
+			return cats.length ? cats[0].cid : null;
+		} catch (err) {
+			log.warn('category lookup failed', err.message);
+			return null;
+		}
+	}
+
+	/**
+	 * Locate an existing mirror topic by its marker comment.
+	 *
+	 * Two details that are easy to get wrong:
+	 *  - the category topic list paginates and both `start` and `stop` are
+	 *    required, so walk it in pages rather than asking once;
+	 *  - marker detection MUST use the v3 single-post route. v1's topic payload
+	 *    HTML-escapes the body, turning `<!-- channel:x -->` into
+	 *    `&lt;!-- channel:x --&gt;`, so a comment search over v1 never matches.
+	 */
+	async findTopicByMarker(cid, marker) {
+		const PAGE = 50;
+		const MAX_PAGES = 10;
+		for (let page = 0; page < MAX_PAGES; page += 1) {
+			const res = await this.nodebb.getCategoryTopics(cid, { from: page * PAGE, to: page * PAGE + PAGE });
+			const topics = (res && res.topics) || [];
+			if (!topics.length) {
+				return null;
+			}
+			for (const topic of topics) {
+				if (!String(topic.title || '').includes(this.config.discord.channelId)) {
+					continue;
+				}
+				if (await this.topicCarriesMarker(topic.tid, marker)) {
+					return topic.tid;
+				}
+			}
+			if (topics.length < PAGE) {
+				return null;
+			}
+		}
+		log.warn('mirror topic search hit the page limit; giving up to avoid a duplicate');
+		return null;
+	}
+
+	async topicCarriesMarker(tid, marker) {
+		try {
+			const topic = await this.nodebb.getTopic(tid);
+			const mainPid = topic && topic.mainPid;
+			if (!mainPid) {
+				return false;
+			}
+			const post = await this.nodebb.getPost(mainPid);
+			return Boolean(post && String(post.content || '').includes(marker));
+		} catch (err) {
+			log.warn('marker check failed', { tid, error: err.message });
+			return false;
+		}
+	}
+
+	async topicExists(tid) {
+		try {
+			await this.nodebb.getTopic(tid);
+			return true;
+		} catch (err) {
+			return false;
+		}
 	}
 
 	discordMessageToHtml(message, member) {

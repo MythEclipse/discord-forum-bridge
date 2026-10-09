@@ -92,7 +92,7 @@ discord.once('ready', async () => {
 	// start from the newest post so a restart never replays history
 	let lastPid = 0;
 	try {
-		const res = await nodebb.getTopicPosts(bridge.topicId, { from: 0, to: 100 });
+		const res = await nodebb.getTopicPosts(bridge.topicId);
 		const posts = (res && res.posts) || [];
 		lastPid = posts.reduce((max, p) => Math.max(max, Number(p.pid) || 0), 0);
 		log.info('forum sync cursor', { lastPid });
@@ -102,7 +102,7 @@ discord.once('ready', async () => {
 
 	const poll = async () => {
 		try {
-			const res = await nodebb.getTopicPosts(bridge.topicId, { from: lastPid, to: lastPid + 50 });
+			const res = await nodebb.getTopicPosts(bridge.topicId);
 			const posts = (res && res.posts) || [];
 			for (const post of posts) {
 				lastPid = Math.max(lastPid, Number(post.pid) || 0);

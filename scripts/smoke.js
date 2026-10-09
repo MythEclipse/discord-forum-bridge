@@ -7,7 +7,9 @@
  */
 
 const assert = require('assert');
-const { parseLadder, rankFor, normaliseHandle } = require('../src/identity');
+const fs = require('fs');
+const path = require('path');
+const { parseLadder, rankFor, normaliseHandle, IdentityStore } = require('../src/identity');
 const { escapeHtml, Bridge } = require('../src/bridge');
 
 const ladder = parseLadder([
@@ -102,6 +104,82 @@ bridge.setBotUserId('BOT');
 	assert.ok(html.includes('&lt;b&gt;'), 'content escaped');
 	assert.ok(html.includes('[SAGE]'), 'rank from ladder');
 	console.log('ok - discord message -> html');
+
+	// ---------------------------------------------------------------------
+	// Restart safety. The single-instance tests above cannot catch this: they
+	// reuse one Bridge, so `topicId` is always warm. Simulate a restart by
+	// constructing a SECOND Bridge over the same fake forum with NO in-memory
+	// topicId — exactly what a systemd restart produces.
+	// ---------------------------------------------------------------------
+	console.log('\n-- restart safety --');
+	const statePath = path.join(__dirname, '..', 'data', 'state.json');
+	const savedState = fs.existsSync(statePath) ? fs.readFileSync(statePath, 'utf8') : null;
+	try { fs.unlinkSync(statePath); } catch (e) { /* absent */ }
+
+	function freshBridge() {
+		const calls = [];
+		const fake = Object.assign({}, fakeNodebb, {
+			createTopic: async (p) => { calls.push(['createTopic', p.cid]); return { tid: 100 + calls.length, slug: p.title }; },
+			getCategoryTopics: async () => ({ topics: [] }),
+			getTopic: async () => ({ tid: 1, mainPid: 1 }),
+			getPost: async () => ({ content: '<p>x</p>' }),
+			getTopicPosts: async () => ({ posts: [{ pid: 1, content: '<p>x</p>' }] }),
+		});
+		const b = new Bridge({
+			discord: { send: async () => {} },
+			nodebb: fake,
+			config: {
+				discord: { channelId: 'C', guildId: 'G' },
+				nodebb: { bridgeUid: '99' },
+				forum: { categorySlug: 'general-discussion', topicPrefix: 'DISCORD' },
+				behaviour: { marker: '<!-- discord-bridge -->' },
+			},
+		});
+		return { b, calls };
+	}
+
+	const run1 = freshBridge();
+	await run1.b.ensureTopic();
+	const firstTid = run1.b.topicId;
+	assert.ok(fs.existsSync(statePath), 'state.json written on topic creation');
+	const persisted = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+	assert.strictEqual(persisted.topicId, firstTid, 'persisted tid matches the live tid');
+
+	// restart: brand new Bridge, warm nothing, but state.json survives
+	const run2 = freshBridge();
+	await run2.b.ensureTopic();
+	assert.strictEqual(run2.b.topicId, firstTid, 'restart resumed the SAME topic');
+	assert.strictEqual(run2.calls.filter((c) => c[0] === 'createTopic').length, 0,
+		'restart did NOT create a second topic');
+	console.log('ok - restart resumes the persisted topic instead of duplicating it');
+
+	// if state.json is lost, the marker search must adopt the existing topic
+	fs.unlinkSync(statePath);
+	const run3 = freshBridge();
+	run3.b.nodebb.getCategoryTopics = async () => ({
+		topics: [{ tid: firstTid, title: 'DISCORD C', slug: 'DISCORD C' }],
+	});
+	run3.b.nodebb.getPost = async () => ({ content: `<p>mirror</p><!-- channel:C -->` });
+	await run3.b.ensureTopic();
+	assert.strictEqual(run3.b.topicId, firstTid, 'adopted the existing topic by marker');
+	assert.strictEqual(run3.calls.filter((c) => c[0] === 'createTopic').length, 0,
+		'no duplicate created when state was lost');
+	console.log('ok - lost state is recovered by marker search, not by duplicating');
+
+	if (savedState === null) { try { fs.unlinkSync(statePath); } catch (e) { /* absent */ } }
+	else { fs.writeFileSync(statePath, savedState); }
+
+	// ladder input shape: the forum returns an ARRAY, defaults are TEXT
+	const arrStore = new IdentityStore();
+	arrStore.setLadder([{ min: 0, name: '[Neophyte]' }, { min: 3, name: '[Apprentice]' }, { min: 10, name: '[Pathfinder]' }]);
+	assert.deepStrictEqual(arrStore.ladder.map((l) => l.min), [0, 3, 10], 'array ladder accepted as-is');
+	assert.strictEqual(arrStore.rankTitleFor(5), '[Apprentice]', 'live array threshold honoured');
+	assert.throws(() => arrStore.setLadder([]), 'empty ladder rejected loudly');
+	const txtStore = new IdentityStore();
+	txtStore.setLadder('0 | [A]\n7 | [B]');
+	assert.deepStrictEqual(txtStore.ladder.map((l) => l.min), [0, 7], 'text ladder still works');
+	console.log('ok - ladder accepts array and text, rejects garbage');
+
 	console.log('\nALL SMOKE TESTS PASSED');
 })().catch((err) => {
 	console.error('SMOKE FAILED', err);

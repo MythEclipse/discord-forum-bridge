@@ -34,7 +34,39 @@ const DEFAULT_NAMES = [
 
 const DEFAULT_LADDER = DEFAULT_MIN.map((min, i) => ({ min, name: DEFAULT_NAMES[i] }));
 
+// Accepts EITHER the raw `min | [Name]` text or an array of { min, name }
+// objects (which is what GET /api/imrnes-ranks/levels returns).
+//
+// Previously this only handled text, so a caller passing the array got
+// String(array) === '[object Object],[object Object]' -> a single line with no
+// '|' -> null -> the caller silently kept DEFAULT_LADDER. The live ladder from
+// the forum was never applied, and nothing warned.
+function normaliseLadderInput(input) {
+	if (Array.isArray(input)) {
+		const parsed = input
+			.map((entry) => {
+				if (!entry || typeof entry !== 'object') {
+					return null;
+				}
+				const min = parseInt(entry.min, 10);
+				const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+				if (Number.isNaN(min) || !name) {
+					return null;
+				}
+				return { min, name };
+			})
+			.filter(Boolean)
+			.sort((a, b) => a.min - b.min);
+		return parsed.length ? parsed : null;
+	}
+	return input;
+}
+
 function parseLadder(text) {
+	// An array was already normalised into { min, name } objects above.
+	if (Array.isArray(text)) {
+		return normaliseLadderInput(text);
+	}
 	if (!text || !String(text).trim()) {
 		return null;
 	}
@@ -126,11 +158,17 @@ class IdentityStore {
 		return null;
 	}
 
-	setLadder(ladderText) {
-		const parsed = parseLadder(ladderText);
-		if (parsed) {
-			this.ladder = parsed;
+	/**
+	 * Accepts the `min | [Name]` text OR an array of { min, name }.
+	 * Returns the ladder actually in effect, and THROWS if the input was
+	 * unusable, so a caller cannot silently keep a stale ladder.
+	 */
+	setLadder(input) {
+		const parsed = parseLadder(input);
+		if (!parsed) {
+			throw new Error(`setLadder received an unusable ladder: ${typeof input === 'object' ? JSON.stringify(input).slice(0, 120) : String(input).slice(0, 120)}`);
 		}
+		this.ladder = parsed;
 		return this.ladder;
 	}
 

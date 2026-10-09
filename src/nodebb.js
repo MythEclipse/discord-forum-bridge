@@ -143,12 +143,41 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 			return { categories: matched };
 		},
 
+		// GET /api/v3/categories/<cid>/topics?start=&stop=
+		//
+		// Both start AND stop are required: omitting stop returns zero topics,
+		// which looks exactly like "this category is empty".
+		getCategoryTopics: (cid, { from = 0, to = 50 } = {}) =>
+			call('GET', `/categories/${encodeURIComponent(cid)}/topics?start=${from}&stop=${to}`),
+
 		// GET /api/v3/topics/<tid>
 		getTopic: (tid) => call('GET', `/topics/${encodeURIComponent(tid)}`),
 
-		// GET /api/v3/topics/<tid>/posts
-		getTopicPosts: (tid, { from = 0, to = 99 } = {}) =>
-			call('GET', `/topics/${encodeURIComponent(tid)}/posts?start=${from}&stop=${to}`),
+		// GET /api/v3/categories/<cid>/topics?start=&stop=
+		//
+		// Both start AND stop are required: omitting stop returns zero topics,
+		// which looks exactly like "this category is empty".
+		getCategoryTopics: (cid, { from = 0, to = 50 } = {}) =>
+			call('GET', `/categories/${encodeURIComponent(cid)}/topics?start=${from}&stop=${to}`),
+
+		// Posts of a topic.
+		//
+		// There is NO v3 endpoint for this: src/routes/write/topics.js registers
+		// only /:tid, /:tid/thumbs, /:tid/events and /:tid/crossposts, and
+		// write/posts.js only exposes a single /:pid. Calling
+		// /api/v3/topics/<tid>/posts returns 404 "Invalid API call" no matter what
+		// pagination params you send. The v1 read API is the working path:
+		//
+		//     GET /api/topic/<tid>   ->  { posts: [...] }
+		//
+		// v1 does NOT wrap the body in { status, response }, so `call` must not be
+		// used here - it would return the object unchanged, which is fine, but the
+		// master-token `_uid` has to be appended manually.
+		getTopicPosts(tid) {
+			const endpoint = `/api/topic/${encodeURIComponent(tid)}`;
+			const full = authMode === 'master' ? withUid(endpoint, actorUid) : endpoint;
+			return request('GET', `${url}${full}`, { token: apiToken });
+		},
 
 		// POST /api/v3/topics  { cid, title, content, uid }
 		createTopic: ({ cid, title, content }) => {
@@ -167,6 +196,14 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 			}
 			return call('POST', `/topics/${encodeURIComponent(tid)}/posts`, payload);
 		},
+
+		// GET /api/v3/posts/<pid>  -> RAW html, comments intact.
+		//
+		// Prefer this over v1's topic payload for marker detection: v1 renders the
+		// post for display and HTML-escapes it, so `<!-- channel:x -->` arrives as
+		// `&lt;!-- channel:x --&gt;` and any comment-based marker search silently
+		// fails. v3 returns the stored value untouched.
+		getPost: (pid) => call('GET', `/posts/${encodeURIComponent(pid)}`),
 
 		// GET /api/v3/users/username/<username>  -> resolved user object
 		getUserByUsername: (username) =>
