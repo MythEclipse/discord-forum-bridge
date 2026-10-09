@@ -207,5 +207,27 @@ function forumPostMarkdown({ nickname, rank, content, link, attachments = [] }) 
 }
 
 module.exports = {
+	// Rewrite a site-relative markdown destination into an absolute one.
+	//
+	// Two independent reasons this is needed, both observed live:
+	//  1. NodeBB stores a composer upload as `<img src="/assets/uploads/...">` -
+	//     RELATIVE. Discord cannot resolve a relative url, so the image renders
+	//     as a broken thumbnail.
+	//  2. A post written as markdown through the API keeps its literal form,
+	//     `![alt](/assets/uploads/...)`, which no HTML rule touches at all.
+	//
+	// Applied to the FINAL text, not inside the HTML chain, so it covers both
+	// shapes. `//host/...` is protocol-relative and must be left alone.
+	absolutiseImages(text) {
+		const origin = String(FORUM_URL || '').replace(/\/+$/, '');
+		if (!origin) {
+			return String(text || '');
+		}
+		return String(text || '').replace(
+			/(\]\()(\/(?!\/)[^)\s]*)/g,
+			(m, prefix, href) => `${prefix}${origin}${href.replace(/[()]/g, encodeURIComponent)}`
+		);
+	},
+
 	MARKER, setForumUrl, htmlEscape, mdEscape, mdLiteral, mdCode, webhookSafe, htmlToPlainText, forumPostMarkdown,
 };

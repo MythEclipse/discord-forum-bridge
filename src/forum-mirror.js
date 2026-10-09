@@ -29,7 +29,7 @@
  * / bot id are a second line of defence.
  */
 
-const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown, setForumUrl } = require('./text');
+const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown, setForumUrl, absolutiseImages } = require('./text');
 const { readState, writeState } = require('./state');
 
 const TOPIC_PAGE_SIZE = 50;
@@ -634,10 +634,14 @@ class ForumMirror {
 	/* ───────────────────────────── rendering ───────────────────────────── */
 
 	renderDiscordPost({ name, rank, html, link }) {
+		// `absolutiseImages` runs on the ALREADY-CONVERTED text so it catches both
+		// a composer upload (which came through as an <img> we turned into
+		// markdown) and a post whose body was already markdown. Doing it inside
+		// htmlToPlainText would only fix the first shape.
 		return [
 			`**${mdEscape(name)}** \`${mdEscape(rank)}\``,
 			'',
-			htmlToPlainText(html),
+			absolutiseImages(htmlToPlainText(html)),
 			'',
 			link,
 			MARKER,

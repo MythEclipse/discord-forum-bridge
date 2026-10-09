@@ -536,6 +536,27 @@ function makeMirror(overrides = {}) {
 			),
 			'an already-absolute src is not double-prefixed'
 		);
+
+		// A post whose body is ALREADY markdown (written through the API, or
+		// typed by a user) never becomes an <img>, so absolutising inside
+		// htmlToPlainText cannot help it. `absolutiseImages` runs on the final
+		// text for that case.
+		const { absolutiseImages } = require('../src/text');
+		assert.strictEqual(
+			absolutiseImages('gif: ![mygif](/assets/uploads/files/1-final.gif)'),
+			'gif: ![mygif](https://forum.imrnes.team/assets/uploads/files/1-final.gif)',
+			'a markdown image with a relative destination is absolutised'
+		);
+		assert.strictEqual(
+			absolutiseImages('![p](//cdn.example/x.png)'),
+			'![p](//cdn.example/x.png)',
+			'a protocol-relative destination is left alone'
+		);
+		assert.strictEqual(
+			absolutiseImages('![y](https://cdn.example/b.png)'),
+			'![y](https://cdn.example/b.png)',
+			'an absolute destination is not double-prefixed'
+		);
 		assert.strictEqual(htmlToPlainText('<p><img alt="no src"></p>'), '', 'an img with no src is dropped');
 		console.log('ok - forum images (incl. GIF) render inline in the Discord mirror');
 	}
