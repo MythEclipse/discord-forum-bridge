@@ -1,0 +1,10 @@
+{
+  "id": "nodebb-plugin-bridge-upload",
+  "name": "Bridge Upload",
+  "description": "Authenticated upload endpoint so the Discord forum bridge can attach images, video and audio to posts",
+  "library": "./library.js",
+  "hooks": [
+    { "hook": "static:app.load", "method": "load" }
+  ],
+  "faIcon": "fa-cloud-upload"
+}

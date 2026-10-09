@@ -1,0 +1,20 @@
+{
+  "name": "nodebb-plugin-bridge-upload",
+  "version": "1.0.0",
+  "description": "Authenticated upload endpoint so the Discord forum bridge can attach images, video and audio to posts",
+  "main": "library.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "nbbpm": {
+    "compatibility": "^4.0.0"
+  },
+  "keywords": [
+    "nodebb",
+    "plugin",
+    "bridge",
+    "upload"
+  ],
+  "dependencies": {}
+}
