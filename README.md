@@ -46,13 +46,53 @@ npm start
 
 ## Discord application checklist
 
-1. Developer Portal -> the application -> **Bot** -> *Reset Token*, copy it.
-2. **Bot -> Privileged Gateway Intents**: enable **Message Content Intent**
-   (and **Server Members Intent** if you want nickname -> forum matching).
-3. Copy the **Bot User ID** (Bot page) — the bridge writes it to `DISCORD_BOT_USER_ID`.
-4. Invite the bot to the guild with `applications.commands` + `bot` scopes and
-   permissions: *View Channel*, *Send Messages*, *Read Message History*,
-   *Embed Links* (in the target channel).
+### 1. Invite the bot into the guild
+
+```bash
+npm run invite
+```
+
+prints the OAuth2 authorize URL built from the ids in `.env`, with the requested
+permission bits printed by name so the grant is reviewable. It prints two: one
+without `guild_id` (a server picker, safest) and one pinned to `DISCORD_GUILD_ID`.
+Open it in a browser as the guild owner and authorise.
+
+Scope is `bot` only. Verified against the live authorize endpoint: `bot` and
+`bot applications.commands` return 200, while `applications.commands.update`
+returns **400** with the near-useless body `{"scope":["1"]}` and
+`applications.commands.permissions` is not a scope at all. The bridge registers no
+slash commands (`!link` is a plain message handler), so `bot` is sufficient. Add
+`applications.commands.update` only after enabling that scope in the Developer
+Portal under OAuth2 → URL Generator.
+
+### 2. Get the bot token
+
+Developer Portal → the application → **Bot** → *Reset Token*. This is a **different
+secret** from the client secret; a client secret returns `401 Unauthorized` on
+`GET /api/v10/gateway/bot` and cannot log in.
+
+### 3. Enable privileged intents
+
+**Bot → Privileged Gateway Intents**: enable **Message Content Intent**, and
+**Server Members Intent** if you want nickname → forum rank matching. Without
+these the bot connects successfully but every message body reads as empty — the
+most common "the bot is online but does nothing" cause.
+
+### 4. Configure and start
+
+Put `DISCORD_BOT_TOKEN` and `DISCORD_BOT_USER_ID` into `.env`, then:
+
+```bash
+systemctl --user start discord-forum-bridge
+journalctl --user -u discord-forum-bridge -f
+```
+
+Confirm membership and permissions were actually granted:
+
+```bash
+curl -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+  https://discord.com/api/v10/users/@me/guilds
+```
 
 ## Forum side
 
