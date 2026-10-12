@@ -231,6 +231,27 @@ class ForumMirror {
 		if (this.topicToThread.size) {
 			this.log.info('tid->thread map restored', { count: this.topicToThread.size });
 		}
+
+		// The cursors MUST come back too. Restoring only the thread map left
+		// `topicCursor` empty, so after every restart pollOnce() treated the
+		// WHOLE topic as new and re-mirrored its entire history into Discord -
+		// observed live as the same pid (50, 52) mirrored twice per poll, roughly
+		// 6 duplicate Discord messages a minute, while the on-disk cursor said 557.
+		// It also explains the "forum is slow" reports: a flood of writes against
+		// an already CPU-saturated box.
+		//
+		// `Number(...)` because JSON has no reason to keep them numeric, and a
+		// string cursor compares wrong against the numeric pid it is checked with.
+		const cursors = (state && state.topicCursors) || {};
+		Object.entries(cursors).forEach(([tid, pid]) => {
+			const n = Number(pid);
+			if (Number.isFinite(n) && n > 0) {
+				this.topicCursor.set(String(tid), n);
+			}
+		});
+		if (this.topicCursor.size) {
+			this.log.info('topic cursors restored', { count: this.topicCursor.size });
+		}
 	}
 
 	async persistState() {

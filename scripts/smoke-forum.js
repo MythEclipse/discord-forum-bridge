@@ -876,6 +876,40 @@ function makeMirror(overrides = {}) {
 	);
 	console.log('ok - image alt text keeps the filename verbatim');
 
+	/* A regression test for a restart flood. restoreState() used to restore the
+	 * tid->thread map but NOT `topicCursors`, so after every restart pollOnce()
+	 * saw an empty cursor map and treated each topic's ENTIRE history as new:
+	 * the same pid was mirrored into Discord again on every poll (~6 duplicate
+	 * messages a minute, live). The thread map looked perfect while the cursors
+	 * silently did not exist.
+	 *
+	 * Written as a REAL fixture on the suite's own temp state path rather than a
+	 * monkey-patch: `forum-mirror` destructures `readState` at require() time, so
+	 * reassigning the export afterwards has no effect on it. */
+	const { STATE_PATH: suiteStatePath } = require('../src/state');
+	const cursorFixture = JSON.stringify({
+		threads: { 7: 'TH7' },
+		topicCursors: { 7: 4242 },
+	});
+	const realSuiteState = fs.existsSync(suiteStatePath) ? fs.readFileSync(suiteStatePath, 'utf8') : null;
+	fs.writeFileSync(suiteStatePath, cursorFixture, 'utf8');
+	try {
+		const restoreMirror = makeMirror().mirror;
+		await restoreMirror.restoreState();
+		assert.strictEqual(
+			restoreMirror.topicCursor.get('7'), 4242,
+			'restoreState() must bring topicCursors back, not just the thread map',
+		);
+		assert.strictEqual(
+			restoreMirror.topicToThread.get('7'), 'TH7',
+			'thread map must still restore',
+		);
+	} finally {
+		if (realSuiteState === null) fs.unlinkSync(suiteStatePath);
+		else fs.writeFileSync(suiteStatePath, realSuiteState, 'utf8');
+	}
+	console.log('ok - restoreState brings the topic cursors back');
+
 	restoreState();
 	console.log('\nALL FORUM-MODE TESTS PASSED');
 })().catch((err) => {
