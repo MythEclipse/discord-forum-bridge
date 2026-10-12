@@ -79,6 +79,65 @@ function isDeletedPlaceholder(content) {
 	return text.includes('[[topic:post-is-deleted]]') || /^\[\[topic:post-is-\w+\]\]$/.test(text.trim());
 }
 
+/**
+ * Collect every sticker on a Discord message into one list.
+ *
+ * Two shapes exist and both are live depending on the gateway version and
+ * whether the sticker is a guild upload or a built-in:
+ *   - `message.sticker_items`: an array of `{ id, name, format_type }`. This is
+ *     the modern shape; the id here is the STICKER id (not an "item" id), which
+ *     is what the CDN path is keyed on.
+ *   - `message.sticker`: a single object, older payloads.
+ *
+ * Normalising here means the mirror only deals with one list shape, and a
+ * message carrying both is not processed twice.
+ *
+ * @param {object} message discord.js Message
+ * @returns {Array<{id: string, name: string, format: number}>}
+ */
+function normaliseStickerItems(message) {
+	const out = [];
+	const push = (st) => {
+		if (!st || !st.id) {
+			return;
+		}
+		// Guard against the same sticker arriving in both shapes.
+		if (out.some((existing) => existing.id === st.id)) {
+			return;
+		}
+		out.push({
+			id: String(st.id),
+			name: st.name ? String(st.name) : 'sticker',
+			format: Number(st.format_type ?? st.formatType ?? st.format) || 1,
+		});
+	};
+	if (Array.isArray(message.sticker_items)) {
+		message.sticker_items.forEach(push);
+	}
+	push(message.sticker);
+	return out;
+}
+
+/**
+ * A filename that keeps the sticker recognisable AND carries an extension the
+ * forum will treat as an image.
+ *
+ * Lottie stickers are JSON (`format_type` 3) and resolve to a PNG preview, so
+ * the extension comes from what was actually downloaded, never from the format
+ * enum. Names are slugged because a raw emoji or a CJK sticker name would make
+ * an awkward upload filename.
+ */
+function stickerFilename(item, extension) {
+	const ext = String(extension || 'png').replace(/^\./, '').toLowerCase();
+	const slug = String(item.name || 'sticker')
+		.normalize('NFKD')
+		.replace(/[^\w\s-]/g, '')
+		.trim()
+		.replace(/\s+/g, '-')
+		.slice(0, 40) || 'sticker';
+	return `${slug}-${item.id}.${ext}`;
+}
+
 class ForumMirror {
 	constructor({ nodebb, discord, config, identity, log }) {
 		// NodeBB stores uploaded-image `src` as a site-relative path, and Discord
@@ -565,9 +624,14 @@ class ForumMirror {
 		// fails to upload must not lose the text, so failures are logged and the
 		// message still posts.
 		const attachments = await this.mirrorAttachments(message, forumUid);
+		// Stickers are NOT attachments - `message.attachments` is empty and the
+		// sticker lives in `sticker_items`. They are resolved separately so both
+		// kinds end up in the same rendered list.
+		const stickers = await this.mirrorStickers(message, forumUid);
 		const res = await this.nodebb.replyToTopic(tid, {
 			content: this.renderForumPost({
-				nickname, content: message.content, link: message.url, attachments,
+				nickname, content: message.content, link: message.url,
+				attachments: attachments.concat(stickers),
 			}),
 			asUid: forumUid || undefined,
 		});
@@ -577,6 +641,67 @@ class ForumMirror {
 			attachments: attachments.length,
 		});
 		return res;
+	}
+
+	/**
+	 * Resolve, download and re-upload every STICKER on a Discord message.
+	 *
+	 * A sticker is NOT an attachment. `message.attachments` stays empty and the
+	 * sticker arrives in `message.sticker_items` (modern) or `message.sticker`
+	 * (legacy single-sticker shape), so a mirror that only walks attachments
+	 * drops every sticker silently - the reply still posts, with no trace of it.
+	 *
+	 * The URL is rebuilt from the sticker id on the Discord CDN rather than read
+	 * off the message, because the CDN path is what stays stable while the
+	 * rendered `sticker.url` getter needs the format enum.
+	 *
+	 * LOTTIE (`format_type: 3`) is a JSON animation vector, not a raster image:
+	 * an `<img>` of it renders as a broken thumb. The node-side preview PNG is
+	 * requested instead, so the sticker is still VISIBLE on the forum even though
+	 * it does not animate there. Silently dropping it would be worse.
+	 *
+	 * Failure policy matches attachments: one unreachable sticker is logged and
+	 * skipped, and the message text is never lost because of it.
+	 *
+	 * @returns {Promise<Array<{url: string, name: string}>>} forum-side copies
+	 */
+	async mirrorStickers(message, forumUid) {
+		const items = normaliseStickerItems(message);
+		if (!items.length) {
+			return [];
+		}
+		const out = [];
+		for (const item of items) {
+			try {
+				// eslint-disable-next-line no-await-in-loop
+				const resolved = await this.discord.stickerItemUrl(item);
+				if (!resolved || !resolved.url) {
+					this.log.warn('sticker has no resolvable url, skipped', {
+						discord: message.id, sticker: item.id,
+					});
+					continue;
+				}
+				// eslint-disable-next-line no-await-in-loop
+				const buf = await this.nodebb.downloadBinary(resolved.url);
+				// A .json extension would make NodeBB treat a Lottie sticker as a
+				// FILE, so the preview download always lands as a raster image.
+				const filename = stickerFilename(item, resolved.extension);
+				// eslint-disable-next-line no-await-in-loop
+				const uploaded = await this.nodebb.uploadAttachment(
+					buf, filename,
+					{ asUid: forumUid || undefined, contentType: resolved.contentType }
+				);
+				out.push({ url: uploaded.url, name: uploaded.name || filename, isImage: true });
+				this.log.debug('sticker mirrored', {
+					discord: message.id, sticker: item.id, format: resolved.extension,
+				});
+			} catch (err) {
+				this.log.warn('sticker upload failed', {
+					discord: message.id, sticker: item.id, err: err.message,
+				});
+			}
+		}
+		return out;
 	}
 
 	/**
@@ -859,4 +984,4 @@ class ForumMirror {
 	}
 }
 
-module.exports = { ForumMirror };
+module.exports = { ForumMirror, normaliseStickerItems, stickerFilename };

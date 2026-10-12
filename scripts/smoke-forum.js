@@ -117,6 +117,11 @@ function makeMirror(overrides = {}) {
 			calls.sent.push({ threadId, ...payload });
 		},
 		fetchMember: async (id) => (overrides.members?.[id] || { id, displayName: 'tester', user: { username: 'tester' } }),
+		// Sticker CDN lookup. `stickerItems` is what discord.js attaches to a
+		// message; each item has `id` (the item, not the sticker) and the mirror
+		// resolves the real sticker url from it.
+		stickerItemUrl: async (item) => (overrides.stickerUrls?.[item.id]
+			?? (overrides.defaultStickerUrl ? { url: overrides.defaultStickerUrl, extension: 'png', contentType: 'image/png' } : null)),
 	};
 
 	const config = {
@@ -654,6 +659,127 @@ function makeMirror(overrides = {}) {
 		assert.ok(!mirror.threadToTopic.has('TH_BAD'), 'no phantom mapping survives a failure');
 		assert.strictEqual(calls.topics.length, 0, 'nothing recorded');
 		console.log('ok - a failed topic creation leaves no phantom mapping');
+	}
+
+	/* ── stickers must render as images on the forum ───────────────────
+	 * A Discord sticker is NOT an attachment: `message.attachments` stays empty
+	 * and the sticker arrives in `message.sticker_items`. Mirroring only
+	 * attachments therefore drops every sticker silently, and the reply lands on
+	 * the forum with no trace of it.
+	 *
+	 * Two shapes must both work:
+	 *   - sticker_items (modern API), each item carrying the real sticker id;
+	 *   - a single `message.sticker` (older shape) with `id`/`name`/`url`.
+	 */
+	{
+		const { mirror, calls, discord } = makeMirror({
+			topics: [], existingThreads: [{ id: 'TH_1', name: '[t:1] Welcome' }],
+			sites: {},
+		});
+		await mirror.start();
+		mirror.topicToThread.set('1', 'TH_1');
+		mirror.threadToTopic.set('TH_1', '1');
+		// The CDN answers a real PNG sticker; uploadAttachment records the call.
+		discord.stickerItemUrl = async (item) => ({
+			url: `https://cdn.discordapp.com/stickers/${item.id}.png`,
+			extension: 'png', contentType: 'image/png',
+		});
+
+		const message = {
+			id: 'MSG_STICK',
+			channelId: 'TH_1',
+			url: 'https://discord.com/channels/g/c/1/1',
+			content: 'halo',
+			author: { id: 'D9', username: 'za', bot: false },
+			attachments: new Map(),
+			sticker_items: [{ id: 'STICK1', name: 'hontoni', format_type: 1 }],
+		};
+		await mirror.onDiscordMessage(message);
+
+		assert.strictEqual(calls.downloads.length, 1, `sticker downloaded once (got ${calls.downloads.length})`);
+		assert.ok(/stickers\/STICK1\.png/.test(calls.downloads[0]), `sticker cdn url used: ${calls.downloads[0]}`);
+		assert.strictEqual(calls.uploads.length, 1, `sticker re-uploaded to the forum (got ${calls.uploads.length})`);
+		assert.ok(/\.png$/.test(calls.uploads[0].filename), `uploaded with an image extension: ${calls.uploads[0].filename}`);
+		const body = calls.replies[0].content;
+		assert.ok(/!\[[^\]]*\]\(https:\/\/forum\.imrnes\.team\/assets\/uploads\/files\//.test(body),
+			`sticker is an inline markdown image, not a bare link: ${body}`);
+		assert.ok(/hontoni|sticker/i.test(body), `the sticker carries a readable label: ${body}`);
+		console.log('ok - a discord sticker is re-uploaded and rendered inline on the forum');
+	}
+
+	/* ── the legacy single-sticker shape ────────────────────────────────── */
+	{
+		const { mirror, calls, discord } = makeMirror({ topics: [], existingThreads: [] });
+		await mirror.start();
+		mirror.topicToThread.set('1', 'TH_1');
+		mirror.threadToTopic.set('TH_1', '1');
+		discord.stickerItemUrl = async () => ({
+			url: 'https://cdn.discordapp.com/stickers/LEGACY.png',
+			extension: 'png', contentType: 'image/png',
+		});
+
+		await mirror.onDiscordMessage({
+			id: 'MSG_STICK2', channelId: 'TH_1', url: 'u', content: 'x',
+			author: { id: 'D9', username: 'za', bot: false },
+			attachments: new Map(),
+			sticker: { id: 'LEGACY', name: 'selamat datang', url: 'https://cdn.discordapp.com/stickers/LEGACY.png' },
+		});
+		assert.strictEqual(calls.uploads.length, 1, 'the single-sticker shape is mirrored too');
+		assert.ok(calls.uploads[0].filename.includes('selamat'), `label comes from the sticker name: ${calls.uploads[0].filename}`);
+		console.log('ok - the single message.sticker shape is mirrored');
+	}
+
+	/* ── stickers must not repeat content or break a sticker-only reply ──
+	 * A sticker-only message has EMPTY content. The reply must still post, and
+	 * the sticker must not be spliced into the body text twice.
+	 */
+	{
+		const { mirror, calls, discord } = makeMirror({ topics: [], existingThreads: [] });
+		await mirror.start();
+		mirror.topicToThread.set('1', 'TH_1');
+		mirror.threadToTopic.set('TH_1', '1');
+		discord.stickerItemUrl = async (item) => ({
+			url: `https://cdn.discordapp.com/stickers/${item.id}.png`,
+			extension: 'png', contentType: 'image/png',
+		});
+
+		await mirror.onDiscordMessage({
+			id: 'MSG_STICK3', channelId: 'TH_1', url: 'u', content: '',
+			author: { id: 'D9', username: 'za', bot: false },
+			attachments: new Map(),
+			sticker_items: [{ id: 'S_A', name: 'a' }, { id: 'S_B', name: 'b' }],
+		});
+		assert.strictEqual(calls.replies.length, 1, 'a sticker-only message still posts');
+		const body = calls.replies[0].content;
+		assert.strictEqual((body.match(/assets\/uploads\/files\//g) || []).length, 2,
+			`both stickers appear exactly once: ${body}`);
+		console.log('ok - a sticker-only reply posts, with each sticker rendered once');
+	}
+
+	/* ── a dead sticker must not lose the message text ────────────────────
+	 * Same rule as attachments: one failing upload must not drop the reply.
+	 */
+	{
+		const { mirror, calls, discord } = makeMirror({ topics: [], existingThreads: [] });
+		await mirror.start();
+		mirror.topicToThread.set('1', 'TH_1');
+		mirror.threadToTopic.set('TH_1', '1');
+		discord.stickerItemUrl = async () => ({
+			url: 'https://cdn.discordapp.com/stickers/GONE.png',
+			extension: 'png', contentType: 'image/png',
+		});
+		mirror.nodebb.downloadBinary = async () => { throw new Error('404 sticker'); };
+		mirror.nodebb.uploadAttachment = async () => { throw new Error('no upload'); };
+
+		await mirror.onDiscordMessage({
+			id: 'MSG_STICK4', channelId: 'TH_1', url: 'u', content: 'teks penting',
+			author: { id: 'D9', username: 'za', bot: false },
+			attachments: new Map(),
+			sticker_items: [{ id: 'GONE', name: 'rusak' }],
+		});
+		assert.strictEqual(calls.replies.length, 1, 'the text still posts when the sticker fails');
+		assert.ok(calls.replies[0].content.includes('teks penting'), 'and the text is intact');
+		console.log('ok - a failed sticker upload does not lose the message text');
 	}
 
 	/* ── the logger must expose every level the bridge calls ─────────── */

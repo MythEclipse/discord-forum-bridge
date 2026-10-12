@@ -20,6 +20,21 @@ const { Client, GatewayIntentBits, Partials, WebhookClient, REST } = require('di
  */
 const NO_WEBHOOK = Symbol('no-webhook');
 
+// Discord CDN root for sticker assets. `cdn.discordapp.com` is the documented
+// host; `media.discordapp.net` serves the same objects and is kept as a
+// fallback because a CDN edge can 404 one host for a single sticker.
+const STICKER_CDN = 'https://cdn.discordapp.com/stickers';
+
+// StickerFormatType -> file extension served on the CDN. APNG (2) is served as
+// .png (it is a PNG that happens to animate), Lottie (3) is .json but we never
+// fetch it - see stickerItemUrl().
+const STICKER_EXT_BY_FORMAT = {
+	1: 'png',
+	2: 'png',
+	3: 'json',
+	4: 'gif',
+};
+
 class DiscordTransport {
 	constructor(config) {
 		this.config = config;
@@ -73,6 +88,74 @@ class DiscordTransport {
 			const guild = await this.client.guilds.fetch(guildId);
 			return await guild.members.fetch(userId);
 		} catch (err) {
+			return null;
+		}
+	}
+
+	/* ───────────────────────────── stickers ────────────────────────────── */
+
+	/**
+	 * Resolve a Discord sticker into a downloadable raster URL.
+	 *
+	 * The CDN serves a sticker at `/stickers/<id>.<ext>` where ext comes from
+	 * its format: `png` (1), `png` for APNG (2, animated), `gif` (4), and
+	 * `json` (3, LOTTIE).
+	 *
+	 * LOTTIE IS THE CASE THAT MATTERS. It is a JSON animation vector, not an
+	 * image: the forum would render an `<img>` of it as a broken thumbnail, and
+	 * NodeBB's uploader would classify it as a FILE rather than an image. So for
+	 * `format_type === 3` we deliberately request the PNG preview the API hands
+	 * back for the sticker instead. The sticker stays visible on the forum; it
+	 * just does not animate there, which is the honest trade - an animated
+	 * renderer (lottie-web) is a client-side dependency the forum does not have.
+	 *
+	 * @param {{id: string, format: number}} item normalised sticker
+	 * @returns {Promise<{url: string, extension: string, contentType: string}|null>}
+	 */
+	async stickerItemUrl(item) {
+		if (!item || !item.id) {
+			return null;
+		}
+		const isLottie = Number(item.format) === 3;
+		const extension = isLottie ? 'png' : (STICKER_EXT_BY_FORMAT[Number(item.format)] || 'png');
+
+		// The guild sticker list is the only endpoint that reliably returns the
+		// `asset` object (and therefore a usable preview URL) for a custom
+		// sticker; a bare GET /stickers/<id> answers 10060 for guild stickers.
+		const preview = await this.stickerPreviewUrl(item.id);
+		if (preview) {
+			return { url: preview, extension: 'png', contentType: 'image/png' };
+		}
+		return {
+			url: `${STICKER_CDN}/${item.id}.${extension}`,
+			extension,
+			contentType: extension === 'gif' ? 'image/gif' : 'image/png',
+		};
+	}
+
+	/**
+	 * Best-effort PNG preview for a sticker.
+	 *
+	 * `GET /guilds/<guild>/stickers` carries an `asset` field per sticker; the
+	 * single-sticker endpoint omits it for guild uploads. Any failure here is
+	 * non-fatal - the caller falls back to the canonical CDN path.
+	 */
+	async stickerPreviewUrl(stickerId) {
+		const guildId = this.config.discord.guildId;
+		if (!guildId) {
+			return null;
+		}
+		try {
+			const list = await this.rest.get(`/guilds/${guildId}/stickers`);
+			if (!Array.isArray(list)) {
+				return null;
+			}
+			const hit = list.find((s) => s && s.id === stickerId);
+			const asset = hit && hit.asset;
+			const url = asset && (asset.url || (asset.hash ? `${STICKER_CDN}/${asset.hash}.png` : null));
+			return url || null;
+		} catch (err) {
+			this.log('debug', 'sticker preview lookup failed', { sticker: stickerId, error: err.message });
 			return null;
 		}
 	}
