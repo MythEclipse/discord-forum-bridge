@@ -13,7 +13,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const { ForumMirror } = require('../src/forum-mirror');
+const { ForumMirror, normaliseStickerItems } = require('../src/forum-mirror');
 const { IdentityStore } = require('../src/identity');
 const { htmlToPlainText, htmlEscape, mdEscape, webhookSafe, forumPostMarkdown, MARKER, chunkMessage } = (() => {
 	const t = require('../src/text');
@@ -909,6 +909,45 @@ function makeMirror(overrides = {}) {
 		else fs.writeFileSync(suiteStatePath, realSuiteState, 'utf8');
 	}
 	console.log('ok - restoreState brings the topic cursors back');
+
+	/* THE bug that hid in plain sight. This test was written against a hand-built
+	 * object `{ sticker_items: [{id, name, format_type}] }`, which is the RAW
+	 * REST shape. discord.js never hands you that: it builds `message.stickers`
+	 * as a Collection of Sticker instances whose format field is `format`, and
+	 * `message.sticker_items` does not exist at all. So every real Discord message
+	 * took the `!items.length` early return and the sticker vanished - while the
+	 * test kept passing against a shape that only the probe ever produced.
+	 *
+	 * Assert against the discord.js shape, not the REST shape. */
+	const { Collection: DjsCollection } = require('../node_modules/discord.js');
+	const asDjsSticker = (id, name, format) => ({
+		id, name, format,
+		toJSON: () => ({ id, name, format_type: format }),
+	});
+	const djsMessage = {
+		stickers: new DjsCollection([
+			['1460995774103158949', asDjsSticker('1460995774103158949', 'hontoni', 1)],
+		]),
+	};
+	assert.strictEqual(
+		normaliseStickerItems(djsMessage).length, 1,
+		'stickers must be read from the discord.js .stickers Collection',
+	);
+	assert.strictEqual(
+		normaliseStickerItems(djsMessage)[0].format, 1,
+		'a discord.js Sticker exposes its format as .format, not .format_type',
+	);
+	assert.strictEqual(
+		normaliseStickerItems(djsMessage)[0].name, 'hontoni',
+		'sticker name survives',
+	);
+	// The raw REST shape must keep working: the probe and any direct REST path
+	// still hand us plain objects.
+	assert.strictEqual(
+		normaliseStickerItems({ sticker_items: [{ id: '1', name: 'n', format_type: 3 }] })[0].format, 3,
+		'the raw REST shape must still be accepted',
+	);
+	console.log('ok - stickers are read from the discord.js .stickers Collection');
 
 	restoreState();
 	console.log('\nALL FORUM-MODE TESTS PASSED');

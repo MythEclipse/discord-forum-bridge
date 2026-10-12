@@ -101,19 +101,40 @@ function normaliseStickerItems(message) {
 		if (!st || !st.id) {
 			return;
 		}
-		// Guard against the same sticker arriving in both shapes.
-		if (out.some((existing) => existing.id === st.id)) {
+		// Guard against the same sticker arriving in more than one shape.
+		if (out.some((existing) => existing.id === String(st.id))) {
 			return;
 		}
+		// discord.js renames `format_type` to `format` when it builds a Sticker
+		// instance, so read every spelling that exists rather than one.
+		const format = Number(st.format ?? st.format_type ?? st.formatType) || 1;
 		out.push({
 			id: String(st.id),
 			name: st.name ? String(st.name) : 'sticker',
-			format: Number(st.format_type ?? st.formatType ?? st.format) || 1,
+			format,
 		});
 	};
+	// THE shape discord.js actually delivers. It does NOT expose
+	// `message.sticker_items`: Message._patch() assigns
+	// `this.stickers = new Collection(...)` keyed by sticker id. Reading
+	// `sticker_items` therefore always yielded undefined, every real sticker hit
+	// the `if (!items.length) return []` early exit, and the post went out with
+	// no image and no error. A Collection is iterable, so `.values()` works for
+	// both a Collection and a plain array.
+	const fromCollection = message.stickers;
+	if (fromCollection) {
+		if (typeof fromCollection.values === 'function' && typeof fromCollection.size === 'number') {
+			fromCollection.values().forEach(push);
+		} else if (Array.isArray(fromCollection)) {
+			fromCollection.forEach(push);
+		}
+	}
+	// The RAW REST shape (`{sticker_items:[{id,name,format_type}]}`), which is
+	// what a direct API call or a probe hands over. Kept so both paths work.
 	if (Array.isArray(message.sticker_items)) {
 		message.sticker_items.forEach(push);
 	}
+	// Legacy single-sticker shape.
 	push(message.sticker);
 	return out;
 }
