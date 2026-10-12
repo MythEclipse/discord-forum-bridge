@@ -128,6 +128,17 @@ function htmlToPlainText(html) {
  * `htmlEscape("<b>")` becomes `&lt;b&gt;` which markdown-it then prints
  * literally as the characters `&lt;b&gt;`.
  */
+function mdAlt(text) {
+	// Alt text inside `![...](...)` ends up as a LITERAL attribute in the
+	// rendered <img>, not as markdown inline formatting. Over-escaping it is
+	// actively harmful: mdLiteral() escapes `.` and `-`, markdown-it leaves that
+	// backslash in the alt attribute, and the observed result was
+	// `alt="hontoni1460995774103158949png"` - the dots simply vanished, so the
+	// reader never saw the real filename. Only `]`, `\` and a line break can
+	// actually terminate the syntax, so those are the only ones worth handling.
+	return String(text || '').replace(/[\[\]\n\r]/g, ' ');
+}
+
 function mdLiteral(text) {
 	return String(text || '')
 		// Backslash-escape every markdown metacharacter that markdown-it resolves
@@ -193,9 +204,9 @@ function forumPostMarkdown({ nickname, rank, content, link, attachments = [] }) 
 		attachments.forEach((att) => {
 			const href = String(att.url || '').replace(/[()]/g, encodeURIComponent);
 			if (/\.(png|jpe?g|gif|webp|bmp|avif)(?:$|[?#])/i.test(href) || att.isImage) {
-				lines.push(`![${mdLiteral(att.name || 'gambar')}](${href})`);
+				lines.push(`![${mdAlt(att.name || 'gambar')}](${href})`);
 			} else {
-				lines.push(`[${mdLiteral(att.name || 'lampiran')}: ${href}](${href})`);
+				lines.push(`[${mdAlt(att.name || 'lampiran')}: ${href}](${href})`);
 			}
 		});
 	}

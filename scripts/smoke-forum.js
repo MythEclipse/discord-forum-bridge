@@ -21,6 +21,23 @@ const { htmlToPlainText, htmlEscape, mdEscape, webhookSafe, forumPostMarkdown, M
 	return { ...t, chunkMessage: d.chunkMessage };
 })();
 
+/* A regression test, not a style preference: mdLiteral() escaped `.` and `-`,
+ * markdown-it kept that backslash inside the image alt attribute, and the
+ * rendered markup came out as alt="hontoni1460995774103158949png" - the dots
+ * disappeared, so a reader (and screen readers) got a meaningless filename.
+ * The image itself rendered, which is exactly why this hid for so long. */
+void (async function testImageAltKeepsFilenameVerbatim() {
+	const body = forumPostMarkdown({
+		nickname: 'za',
+		content: '',
+		attachments: [{ name: 'hontoni-1460995774103158949.png', url: 'https://forum.imrnes.team/assets/uploads/files/x.png' }],
+	});
+	assert(/^!\[hontoni-1460995774103158949\.png\]\(/m.test(body),
+		'filename with dots and dashes must survive verbatim in the alt text');
+	assert(!body.includes('\\-') && !body.includes('\\.'),
+		'alt text must not carry markdown backslash escapes');
+})();
+
 // Must resolve to the SAME path src/state.js uses. The suite overrides it with
 // BRIDGE_DATA_DIR (a temp dir, set by `npm run check:forum`) so a failing test
 // can never leave its fixtures in the live bridge state.
@@ -835,6 +852,29 @@ function makeMirror(overrides = {}) {
 	}
 	assert.strictEqual(createAttempts, 1, `webhook creation attempted once, not per message (got ${createAttempts})`);
 	console.log('ok - webhook failure is cached, not retried per message');
+
+	/* A regression test, not a style preference. mdLiteral() escaped `.` and `-`,
+	 * markdown-it kept that backslash inside the image alt attribute, and the
+	 * rendered markup came out as alt="hontoni1460995774103158949png" - the dots
+	 * disappeared. The image itself still rendered, which is exactly why this
+	 * stayed hidden: the post looked fine, only the filename was corrupted. */
+	const altBody = forumPostMarkdown({
+		nickname: 'za',
+		content: '',
+		attachments: [{
+			name: 'hontoni-1460995774103158949.png',
+			url: 'https://forum.imrnes.team/assets/uploads/files/x.png',
+		}],
+	});
+	assert.ok(
+		altBody.includes('![hontoni-1460995774103158949.png]('),
+		`filename with dots and dashes must survive verbatim in the alt text: ${altBody}`,
+	);
+	assert.ok(
+		!altBody.includes('\\-') && !altBody.includes('\\.'),
+		`alt text must not carry markdown backslash escapes: ${altBody}`,
+	);
+	console.log('ok - image alt text keeps the filename verbatim');
 
 	restoreState();
 	console.log('\nALL FORUM-MODE TESTS PASSED');
