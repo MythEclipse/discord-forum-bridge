@@ -20,7 +20,19 @@ const crypto = require('crypto');
 
 let writeCounter = 0;
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+// Overridable so tests can never touch the live state file.
+//
+// This is not theoretical: the smoke suite constructs a real ForumMirror, whose
+// persistState() writes to this path. Because the suite only restores the
+// original file at the very END, any test failure or crash in between leaves
+// the test's fixtures in production state - which then showed up as bogus
+// entries (`"7": "TH1"`, `"501": "TH_RACE"`) that the bridge then treated as
+// real thread mappings and spammed Discord with re-mirrored old posts.
+//
+// `npm test` sets BRIDGE_DATA_DIR; production leaves it unset.
+const DATA_DIR = process.env.BRIDGE_DATA_DIR
+	? path.resolve(process.env.BRIDGE_DATA_DIR)
+	: path.join(__dirname, '..', 'data');
 const STATE_PATH = path.join(DATA_DIR, 'state.json');
 
 async function readState() {

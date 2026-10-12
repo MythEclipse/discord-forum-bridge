@@ -21,7 +21,10 @@ const { htmlToPlainText, htmlEscape, mdEscape, webhookSafe, forumPostMarkdown, M
 	return { ...t, chunkMessage: d.chunkMessage };
 })();
 
-const STATE_PATH = path.join(__dirname, '..', 'data', 'state.json');
+// Must resolve to the SAME path src/state.js uses. The suite overrides it with
+// BRIDGE_DATA_DIR (a temp dir, set by `npm run check:forum`) so a failing test
+// can never leave its fixtures in the live bridge state.
+const STATE_PATH = require('../src/state').STATE_PATH;
 const savedState = fs.existsSync(STATE_PATH) ? fs.readFileSync(STATE_PATH, 'utf8') : null;
 
 function resetState() {
