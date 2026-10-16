@@ -1,3 +1,9 @@
 node_modules
 .env
 data/
+.env.*
+*.bak
+*.bak.*
+*.log
+state.json
+node_modules/
