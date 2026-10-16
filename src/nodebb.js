@@ -276,38 +276,98 @@ function createClient({ url, apiToken, uid, bridgeUid, authMode: mode = 'user' }
 		 * posted as reply 47 "never reached" Discord.
 		 *
 		 * v1 is still the right source for the pid LIST (v3 has no such route)
-		 * and it reports how many pages exist, so walk to the end and stop as
-		 * soon as a page comes back empty.
-		 */
-		async getTopicPosts(tid, { maxPages = 40 } = {}) {
-			const endpoint = `/api/topic/${encodeURIComponent(tid)}`;
-			const withPage = (page) => {
-				const q = page ? `?page=${page}` : '';
-				const full = authMode === 'master' ? withUid(`${endpoint}${q}`, actorUid) : `${endpoint}${q}`;
-				return request('GET', `${url}${full}`, { token: apiToken });
-			};
+		 	 * and it reports how many pages exist, so walk to the end and stop as
+		 	 * soon as a page comes back empty.
+		 	 *
+		 	 * COST (measured 2026-10-16 on imrnes): walking FORWARD through every page
+		 	 * and then fetching every pid cost 372 requests for one 353-post topic and
+		 	 * ~2070 per poll cycle across 20 topics, i.e. ~372k requests/hour. Measured
+		 	 * page order: page 1 holds the OLDEST pids and the LAST page the newest
+		 	 * (page1=[559..581], page18=[938..952] for tid 19), so a forward walk can
+		 	 * only stop early at the very END - useless when the cursor is already near
+		 	 * the tip.
+		 	 *
+		 	 * Two changes follow from that ordering:
+		 	 *
+		 	 * 1. When `afterPid` (the cursor) is supplied, walk BACKWARDS from the last
+		 	 *    page and stop as soon as a page's oldest pid is <= the cursor. That
+		 	 *    makes a steady-state poll one request instead of 372.
+		 	 * 2. Only fetch the full pid list when the caller actually needs old posts
+		 	 *    (e.g. a backfill or a restart with no cursor). With a cursor we already
+		 	 *    know which pids matter.
+		 	 *
+		 	 * `postCount`/`perPage` come from the category listing the poll loop already
+		 	 * holds, so this costs no extra request.
+		 	 */
+		 	async getTopicPosts(tid, {
+		 		maxPages = 40,
+		 		afterPid = 0,
+		 		postCount = null,
+		 		perPage = 20,
+		 	} = {}) {
+		 		const endpoint = `/api/topic/${encodeURIComponent(tid)}`;
+		 		const cursor = Number(afterPid) || 0;
+		 		const withPage = (page) => {
+		 			const q = page ? `?page=${page}` : '';
+		 			const full = authMode === 'master' ? withUid(`${endpoint}${q}`, actorUid) : `${endpoint}${q}`;
+		 			return request('GET', `${url}${full}`, { token: apiToken });
+		 		};
 
-			const pids = [];
-			const seen = new Set();
-			for (let page = 1; page <= maxPages; page += 1) {
-				// eslint-disable-next-line no-await-in-loop
-				const listing = await withPage(page);
-				const batch = (listing && listing.posts ? listing.posts : []);
-				if (!batch.length) {
-					break;
-				}
-				batch.forEach((p) => {
-					const pid = Number(p && p.pid);
-					if (pid && !seen.has(pid)) {
-						seen.add(pid);
-						pids.push(pid);
-					}
-				});
-			}
-			if (!pids.length) {
-				return { posts: [] };
-			}
-			const posts = await Promise.all(pids.map(async (pid) => {
+		 		const pids = [];
+		 		const seen = new Set();
+		 		const collect = (batch) => {
+		 			batch.forEach((p) => {
+		 				const pid = Number(p && p.pid);
+		 				if (pid && !seen.has(pid)) {
+		 					seen.add(pid);
+		 					pids.push(pid);
+		 				}
+		 			});
+		 		};
+
+		 		if (cursor > 0) {
+		 			// Backwards walk: the newest posts sit on the last page, so start
+		 			// there and stop the moment a page is fully behind the cursor.
+		 			const total = Number(postCount) > 0
+		 				? Math.ceil(Number(postCount) / perPage)
+		 				: maxPages;
+		 			const firstPage = Math.max(1, Math.min(total, maxPages));
+		 			for (let page = firstPage; page >= 1; page -= 1) {
+		 				// eslint-disable-next-line no-await-in-loop
+		 				const listing = await withPage(page);
+		 				const batch = (listing && listing.posts ? listing.posts : []);
+		 				if (!batch.length) {
+		 					continue;
+		 				}
+		 				collect(batch);
+		 				const oldest = Math.min(...batch.map((p) => Number(p && p.pid) || 0));
+		 				if (oldest > 0 && oldest <= cursor) {
+		 					break;
+		 				}
+		 			}
+		 		} else {
+		 			// No cursor: a backfill genuinely needs the whole history, so keep
+		 			// the original forward walk.
+		 			for (let page = 1; page <= maxPages; page += 1) {
+		 				// eslint-disable-next-line no-await-in-loop
+		 				const listing = await withPage(page);
+		 				const batch = (listing && listing.posts ? listing.posts : []);
+		 				if (!batch.length) {
+		 					break;
+		 				}
+		 				collect(batch);
+		 			}
+		 		}
+		 		if (!pids.length) {
+		 			return { posts: [] };
+		 		}
+		 		// With a cursor we only ever care about the new tail; skip the v3 re-fetch
+		 		// for posts the caller will discard anyway.
+		 		const wanted = cursor > 0 ? pids.filter((pid) => pid > cursor) : pids;
+		 		if (!wanted.length) {
+		 			return { posts: [] };
+		 		}
+		 		const posts = await Promise.all(wanted.map(async (pid) => {
 				try {
 					const post = await call('GET', `/posts/${encodeURIComponent(pid)}`);
 					return Object.assign({ pid }, post);

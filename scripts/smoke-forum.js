@@ -949,6 +949,72 @@ function makeMirror(overrides = {}) {
 	);
 	console.log('ok - stickers are read from the discord.js .stickers Collection');
 
+	// ── poll cost: an unchanged topic must cost ZERO fetches ──
+	// Measured 2026-10-16 on imrnes: the old code refetched every topic on every
+	// 20s cycle (~2070 requests/poll, ~372k/hour) because getTopicPosts walked
+	// the whole history even when nothing had been posted. Two guards now exist:
+	// skip on unchanged `lastposttime`, and a backwards cursor-bounded walk.
+	const costed = makeMirror({
+		topics: [
+			{ tid: 1, title: 'Steady', uid: 1, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'aryma' } },
+		],
+		postsByTopic: { 1: [{ pid: 10, tid: 1, content: 'hello' }] },
+	});
+	let fetches = 0;
+	const realGet = costed.nodebb.getTopicPosts;
+	costed.nodebb.getTopicPosts = async (...args) => { fetches += 1; return realGet(...args); };
+
+	await costed.mirror.start();
+	// Establish a cursor for tid 1 so the skip is allowed to engage.
+	costed.mirror.topicCursor.set('1', 10);
+	await costed.mirror.pollOnce();
+	assert.strictEqual(fetches, 1, 'first pass fetches the topic once and seeds the cache');
+	await costed.mirror.pollOnce();
+	await costed.mirror.pollOnce();
+	assert.strictEqual(fetches, 1, 'an unchanged topic costs ZERO fetches on later polls');
+	console.log('ok - an unchanged topic is skipped instead of refetched');
+
+	// A topic with NO cursor must always be fetched, or its cursor could never
+	// be established and its history would never mirror at all.
+	const fresh = makeMirror({
+		topics: [
+			{ tid: 2, title: 'Never seen', uid: 1, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'aryma' } },
+		],
+		postsByTopic: { 2: [{ pid: 20, tid: 2, content: 'first post' }] },
+	});
+	await fresh.mirror.start();
+	await fresh.mirror.pollOnce();
+	assert.ok(
+		fresh.mirror.topicCursor.has('2'),
+		'a topic without a cursor is always fetched so its cursor can be seeded',
+	);
+	console.log('ok - a topic with no cursor is never skipped');
+
+	// When lastposttime moves, the topic MUST be refetched, otherwise new posts
+	// would be silently dropped - the exact failure mode the cursor logic is
+	// supposed to prevent.
+	const moving = makeMirror({
+		topics: [
+			{ tid: 3, title: 'Moves', uid: 1, timestamp: 1700000000, lastposttime: 1700000100, user: { username: 'aryma' } },
+		],
+		postsByTopic: { 3: [{ pid: 30, tid: 3, content: 'one' }] },
+	});
+	await moving.mirror.start();
+	moving.mirror.topicCursor.set('3', 30);
+	await moving.mirror.pollOnce();
+	const before = moving.calls.sent.length;
+	// Simulate a new forum post: the listing's lastposttime advances.
+	moving.mirror.nodebb.listCategoryTopics = async () => ({
+		topics: [{ tid: 3, title: 'Moves', uid: 1, timestamp: 1700000000, lastposttime: 1799999999, postcount: 2, user: { username: 'aryma' } }],
+	});
+	moving.mirror.nodebb.getTopicPosts = async () => ({ posts: [{ pid: 31, tid: 3, content: 'two' }] });
+	await moving.mirror.pollOnce();
+	assert.strictEqual(
+		moving.calls.sent.length, before + 1,
+		'an advanced lastposttime forces a refetch and the new post is mirrored',
+	);
+	console.log('ok - an advanced lastposttime forces a refetch');
+
 	restoreState();
 	console.log('\nALL FORUM-MODE TESTS PASSED');
 })().catch((err) => {

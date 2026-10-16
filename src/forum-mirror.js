@@ -184,6 +184,15 @@ class ForumMirror {
 
 		// tid -> newest pid mirrored, so polling is cheap and resumable.
 		this.topicCursor = new Map();
+		// tid -> the last `lastposttime` we observed in the category listing.
+		// The listing is ONE request for the whole category, so when a topic's
+		// lastposttime is unchanged there is provably nothing new in it and the
+		// per-topic fetch can be skipped entirely. This is the difference between
+		// ~2070 requests per poll and ~1 (measured 2026-10-16 on imrnes).
+		//
+		// Deliberately NOT persisted: on a restart the cache is empty, which is
+		// the safe direction - every topic is fetched once and repopulates it.
+		this.topicFreshness = new Map();
 		// thread ids proven to exist on Discord, so ensureThread() does not
 		// re-GET the same live thread for every single post
 		this.threadAlive = new Set();
@@ -991,16 +1000,42 @@ class ForumMirror {
 			.sort((a, b) => (Number(a.lastposttime) || 0) - (Number(b.lastposttime) || 0));
 
 		let mirrored = 0;
+		let skipped = 0;
+		let fetched = 0;
 		for (const topic of ordered) {
 			const tid = String(topic.tid);
 			const cursor = Number(this.topicCursor.get(tid)) || 0;
+
+			// C: one category listing request tells us every topic's
+			// `lastposttime`. If it has not moved, nothing was posted, so the
+			// per-topic fetch cannot reveal a new pid. Skipping is only safe when
+			// we ALREADY hold a cursor: with cursor 0 every post counts as new, so
+			// a topic that has never been mirrored must always be fetched or its
+			// cursor would never be established.
+			const lastposttime = Number(topic.lastposttime) || 0;
+			if (cursor > 0 && lastposttime > 0
+				&& this.topicFreshness.get(tid) === lastposttime) {
+				skipped += 1;
+				continue;
+			}
+
 			let posts;
 			try {
-				posts = await this.nodebb.getTopicPosts(tid);
+				// B: hand the cursor down so getTopicPosts can walk backwards
+				// from the last page and stop at the first page that is entirely
+				// behind the cursor, instead of paginating the whole history.
+				posts = await this.nodebb.getTopicPosts(tid, {
+					afterPid: cursor,
+					postCount: Number(topic.postcount) || null,
+				});
+				fetched += 1;
 			} catch (err) {
 				this.log.warn('topic poll failed', { tid, error: trace(err).message });
 				continue;
 			}
+			// Only remember the timestamp once the fetch SUCCEEDED, so a failed
+			// topic is retried next cycle rather than being skipped forever.
+			this.topicFreshness.set(tid, lastposttime);
 			for (const post of posts.posts || []) {
 				const pid = Number(post.pid) || 0;
 				if (!pid || pid <= cursor || this.seenForum.has(pid)) {
@@ -1021,6 +1056,13 @@ class ForumMirror {
 		}
 		if (mirrored) {
 			await this.persistState();
+		}
+		// Expose the skip ratio: it is the only honest proof the optimisation is
+		// working, because a low CPU number alone could also mean a dead bridge.
+		if (this.log.debug) {
+			this.log.debug('poll cycle', {
+				topics: ordered.length, fetched, skipped, mirrored,
+			});
 		}
 		return mirrored;
 	}
