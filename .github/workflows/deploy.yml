@@ -35,10 +35,20 @@ jobs:
       - name: Install the deploy key
         # The file redirect keeps the private key out of argv, out of any
         # variable, and out of the transcript.
+        #
+        # `install -m 600 /dev/null ~/.ssh/...` FAILS on a GitHub runner:
+        # ~/.ssh does not exist until an ssh command creates it, and install
+        # does not create parents. So mkdir first. The key is written by
+        # redirecting rather than by echoing the secret through a pipe, which
+        # keeps it out of any intermediate process's argv.
         run: |
-          install -m 600 /dev/null ~/.ssh/deploy_key
-          cat ~/.ssh/deploy_key <<< "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          # A malformed key fails here rather than inside ssh with exit 255.
+          ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
           ssh-keyscan -H 43.134.105.109 >> ~/.ssh/known_hosts
 
       # A hosted runner has no route to 100.64.0.0/10, so VPS_HOST is the PUBLIC
