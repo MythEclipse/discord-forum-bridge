@@ -1,0 +1,28 @@
+# Dependabot version updates.
+#
+# package.json here is managed by npm, so the ecosystem value below is "npm" and
+# not a package-manager-specific one. GitHub maps pnpm and yarn onto "npm" and
+# then infers the lockfile; an unknown value such as "pnpm" is rejected outright,
+# which stops Dependabot for the whole repository rather than failing one entry.
+version: 2
+updates:
+  # package.json + package-lock.json at the repository root.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # GitHub applies a default 3-day cooldown to version updates since
+    # September 2026. Stating it explicitly documents the intent rather than
+    # relying on a platform default that can change without notice.
+    cooldown:
+      default-days: 3
+
+  # Actions referenced in .github/workflows/ci.yml. These resolve instantly, so
+  # the cooldown above does not apply — a days-old actions/checkout is not
+  # security-relevant in the way a days-old dependency is.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10

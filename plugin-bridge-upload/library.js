@@ -58,29 +58,17 @@ const path = require('path');
 const pluginData = require('./plugin.json');
 
 // Resolve NodeBB core modules from the APP ROOT, not from this plugin's own
-// directory. This plugin is installed as a symlink into /opt/config, so the
-// usual `../../src/routes/helpers` relative require walks out of the app and
+// directory. This plugin is installed as a symlink into /opt/nodebb/plugins, so
+// the usual `../../src/routes/helpers` relative require walks out of the app and
 // throws "Cannot find module". `module.parent` is NOT a safe anchor either: when
 // the plugin is required directly (tests, probes) it is undefined, and the
 // resulting TypeError makes NodeBB skip the plugin with no useful message.
 //
-// NodeBB is always installed at /usr/src/app in the official image, and
-// nconf('baseDir') is only readable once the app has booted. Using the known
-// app root keeps this deterministic, with a small fallback walk so a non-standard
-// layout still resolves.
-function resolveAppRoot() {
-	const candidates = [
-		process.env.NODEBB_APP_ROOT,
-		'/usr/src/app',
-		path.resolve(__dirname, '../../../..'),
-	].filter(Boolean);
-	for (const root of candidates) {
-		if (fs.existsSync(path.join(root, 'src/routes/helpers.js'))) {
-			return root;
-		}
-	}
-	return '/usr/src/app';
-}
+// The lookup lives in ./app-root.js rather than here so it can be tested.
+// Requiring this file pulls in src/routes/helpers, and NodeBB core calls
+// process.exit(0) when those modules are loaded outside a booted app — so
+// `require('./library')` cannot be used as a test subject at all.
+const { resolveAppRoot } = require('./app-root');
 
 const APP_ROOT = resolveAppRoot();
 const coreRequire = require('module').createRequire(path.join(APP_ROOT, 'package.json'));

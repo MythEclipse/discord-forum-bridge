@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: discord-forum-bridge-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Bridge checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The version comes from the packageManager field when present, so the
+      # action and the lockfile cannot drift apart. This repo currently has no
+      # pin, so npm is used and the lockfile is the only constraint.
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Syntax check every JS file
+        run: |
+          set -euo pipefail
+          count=0
+          for f in $(find src scripts test -name '*.js'); do
+            node --check "$f"
+            count=$((count + 1))
+          done
+          echo "checked $count JS files"
+
+      # check-nodebb-client.js boots a stub NodeBB on 127.0.0.1 and asserts the
+      # request shapes the bridge depends on: the multipart field name, auth
+      # mode handling, error translation. It needs no forum and no secrets, so
+      # CI can run the same assertions that run locally.
+      - name: NodeBB client checks
+        run: npm run check:client
+
+      # The forum-mode suite runs against a temporary BRIDGE_DATA_DIR so it
+      # never touches the real cursor state. It exercises markdown conversion,
+      # rank boundaries and anti-echo logic.
+      - name: Forum mode checks
+        run: npm run check:forum
+
+      # The vendored plugin-bridge-upload/ copy drifted badly enough to be
+      # actively misleading: it still resolved the app root to the Docker path,
+      # so anyone reading this repo would copy code that cannot work on a native
+      # install. This check runs the drift assertions directly.
+      - name: Vendored plugin and forum-origin checks
+        run: node test/nodebb-client.test.js
