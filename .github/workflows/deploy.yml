@@ -41,14 +41,21 @@ jobs:
         # does not create parents. So mkdir first. The key is written by
         # redirecting rather than by echoing the secret through a pipe, which
         # keeps it out of any intermediate process's argv.
+        #
+        # KEY_PATH is declared once here and reused by every later step, because
+        # writing to one path and reading from another only fails at run time with
+        # "Identity file ... not accessible" plus a bare "Permission denied
+        # (publickey)" - which reads like a bad key rather than a missing file.
+        env:
+          KEY_PATH: ${{ runner.temp }}/deploy_key
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
           # A malformed key fails here rather than inside ssh with exit 255.
-          ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
+          ssh-keygen -y -f "$KEY_PATH" >/dev/null
           ssh-keyscan -H 43.134.105.109 >> ~/.ssh/known_hosts
 
       # A hosted runner has no route to 100.64.0.0/10, so VPS_HOST is the PUBLIC
