@@ -41,7 +41,36 @@ void (async function testImageAltKeepsFilenameVerbatim() {
 // Must resolve to the SAME path src/state.js uses. The suite overrides it with
 // BRIDGE_DATA_DIR (a temp dir, set by `npm run check:forum`) so a failing test
 // can never leave its fixtures in the live bridge state.
+//
+// THE GUARD BELOW IS NOT OPTIONAL. Relying on the npm wrapper was a real
+// outage on 2026-10-17: running this file directly (`node scripts/smoke-forum.js`)
+// resolved STATE_PATH to the PRODUCTION data/state.json, and because the run
+// then FAILED an assertion, restoreState() never executed. The fixture it left
+// behind - `{ threads: {7: 'DEAD'}, topicCursors: {} }` - wiped every cursor the
+// live bridge held, so the next poll treated all 20 topics as brand new and
+// re-mirrored history: the journal showed `{"fetched":20,"skipped":0,
+// "mirrored":35}`, i.e. 35 duplicate messages pushed to Discord, and the cursor
+// count fell from 18 to 5.
+//
+// So the check lives HERE, inside the file, and it is fail-fast. A test suite
+// must not be able to damage production state by being invoked the "wrong" way -
+// that is exactly the kind of mistake a wrapper-only guard cannot prevent.
+//
+// ORDERING: this guard MUST run before `require('../src/state')`. src/state.js
+// reads BRIDGE_DATA_DIR at import time to compute STATE_PATH, so importing first
+// would already have bound the production path and the second check below could
+// never fire.
+if (!process.env.BRIDGE_DATA_DIR) {
+	console.error('REFUSING TO RUN: BRIDGE_DATA_DIR is not set.');
+	console.error('This suite writes state.json and would use the LIVE bridge state.');
+	console.error('Run it via `npm run check:forum`, or set BRIDGE_DATA_DIR to a temp dir.');
+	process.exit(2);
+}
 const STATE_PATH = require('../src/state').STATE_PATH;
+if (!STATE_PATH.startsWith(process.env.BRIDGE_DATA_DIR)) {
+	console.error(`REFUSING TO RUN: STATE_PATH (${STATE_PATH}) is outside BRIDGE_DATA_DIR.`);
+	process.exit(2);
+}
 const savedState = fs.existsSync(STATE_PATH) ? fs.readFileSync(STATE_PATH, 'utf8') : null;
 
 function resetState() {

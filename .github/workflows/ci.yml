@@ -34,6 +34,18 @@ jobs:
       - name: Install deps
         run: npm ci
 
+      # smoke-state-guard.js runs FIRST on purpose. It asserts that the scripts
+      # which write state.json refuse to run without BRIDGE_DATA_DIR. On
+      # 2026-10-17 a direct `node scripts/smoke-forum.js` (bypassing the npm
+      # wrapper that sets that var) wrote a test fixture into the LIVE state file;
+      # because the run then failed an assertion, its cleanup never ran, every
+      # cursor was wiped, and the bridge re-mirrored 35 posts into Discord
+      # (journal: {"fetched":20,"skipped":0,"mirrored":35}). A guard inside the
+      # file - not only in the wrapper - is what prevents a repeat, and this
+      # step is what keeps those guards honest.
+      - name: State guard checks
+        run: npm run check:guard
+
       - name: Syntax check every JS file
         run: |
           set -euo pipefail

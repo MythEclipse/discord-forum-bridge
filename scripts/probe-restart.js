@@ -10,6 +10,22 @@
  * Requires the NodeBB half of the config only - no Discord credentials.
  */
 
+// Where does this write? `src/state.js` picks the directory from BRIDGE_DATA_DIR
+// and falls back to the LIVE `data/` folder. This probe calls `writeState` to
+// clear the topic fields, so without the env var it edits production state.
+//
+// The same class of mistake caused a real outage on 2026-10-17: a test suite run
+// directly (bypassing its npm wrapper) wrote a fixture into the live state file,
+// wiping the cursors and making the bridge re-mirror 35 posts into Discord.
+// A guard inside the file is what actually prevents that, so:
+if (!process.env.BRIDGE_DATA_DIR) {
+	console.error('REFUSING TO RUN: BRIDGE_DATA_DIR is not set.');
+	console.error('This probe calls writeState() and would edit the LIVE bridge state.');
+	console.error('Set BRIDGE_DATA_DIR to a temp dir first, e.g.:');
+	console.error('  BRIDGE_DATA_DIR=$(mktemp -d) node scripts/probe-restart.js');
+	process.exit(2);
+}
+
 const { loadNodebbConfig } = require('../src/config');
 const { createClient } = require('../src/nodebb');
 const { Bridge } = require('../src/bridge');
