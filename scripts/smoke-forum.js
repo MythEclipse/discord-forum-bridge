@@ -146,7 +146,7 @@ function makeMirror(overrides = {}) {
 
 	const config = {
 		discord: { channelId: 'C1', guildId: 'G1' },
-		nodebb: { url: 'https://forum.imrnes.team', bridgeUid: '12' },
+		nodebb: { url: 'https://forum.imrnes.team', publicUrl: 'https://forum.imrnes.team', bridgeUid: '12' },
 		forum: { categorySlug: 'general-discussion', backfill: '1' },
 		behaviour: { marker: '<!-- imrnes-bridge -->', syncIntervalMs: 20000, raceSyncIntervalMs: 300000 },
 	};

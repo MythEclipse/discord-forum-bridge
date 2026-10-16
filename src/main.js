@@ -113,7 +113,7 @@ async function main() {
 					// Confirm in-channel so the user is not left guessing whether the
 					// post landed. Failure to send this must not undo the topic.
 					await message.channel.send(
-						`:white_check_mark: Diskusi ini sekarang ada di forum: ${config.nodebb.url}/topic/${res.tid}`
+						`:white_check_mark: Diskusi ini sekarang ada di forum: ${config.nodebb.publicUrl}/topic/${res.tid}`
 					).catch((err) => log.warn('could not post the topic link', err.message));
 				}
 			}

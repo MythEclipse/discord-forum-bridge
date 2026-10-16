@@ -6,14 +6,15 @@
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
-    "check": "npm run check:url && npm run check:client && npm run check:forum && npm run check:media",
+    "check": "npm run check:url && npm run check:client && npm run check:forum && npm run check:media && npm run check:intro",
     "probe:forum": "node scripts/probe-forum.js",
     "invite": "node scripts/invite-url.js",
     "probe:restart": "node scripts/probe-restart.js",
     "check:forum": "BRIDGE_DATA_DIR=$(mktemp -d) node scripts/smoke-forum.js",
     "check:client": "node scripts/check-nodebb-client.js",
     "check:url": "node scripts/check-nodebb-url.js",
-    "check:media": "node scripts/smoke-media.js"
+    "check:media": "node scripts/smoke-media.js",
+    "check:intro": "node scripts/smoke-thread-intro.js"
   },
   "engines": {
     "node": ">=20"

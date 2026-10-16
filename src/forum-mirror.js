@@ -163,7 +163,7 @@ class ForumMirror {
 	constructor({ nodebb, discord, config, identity, log }) {
 		// NodeBB stores uploaded-image `src` as a site-relative path, and Discord
 		// cannot resolve one, so htmlToPlainText() needs the absolute origin.
-		setForumUrl(config.nodebb.url);
+		setForumUrl(config.nodebb.publicUrl);
 		this.nodebb = nodebb;
 		this.discord = discord;
 		this.config = config;
@@ -380,9 +380,13 @@ class ForumMirror {
 			return adopted.id;
 		}
 		const name = this.threadNameFor(topic);
+		// The v3 topic object carries only `uid`, so the intro's author line needs
+		// a lookup. It is best-effort: a failed lookup degrades to 'pengguna forum'
+		// rather than blocking thread creation.
+		const authorName = await this.topicAuthorName(topic);
 		const created = await this.discord.createThread(this.config.discord.channelId, {
 			name,
-			message: this.threadIntro(topic),
+			message: this.threadIntro(topic, authorName),
 		});
 		this.topicToThread.set(tid, created.id);
 		this.threadToTopic.set(created.id, tid);
@@ -446,12 +450,77 @@ class ForumMirror {
 		return `${stamp} ${title || 'Untitled topic'}`.trim();
 	}
 
-	threadIntro(topic) {
-		const link = `${this.config.nodebb.url}/topic/${topic.tid}`;
-		const when = Number(topic.timestamp) ? new Date(Number(topic.timestamp) * 1000).toISOString() : 'unknown date';
+	/**
+	 * Opening message of a Discord thread created from a forum topic.
+	 *
+	 * Three independent bugs lived here, all found from one real Discord message:
+	 *
+	 *  1. `topic.timestamp` from the v3 topic object is in MILLISECONDS, not
+	 *     seconds. Multiplying by 1000 again produced the nonsense date
+	 *     `+058750-05-10T09:07:05.000Z` for a topic created 2026-10-12. Verified
+	 *     against the live API: timestamp 1791814900025 -> 2026-10-12T14:21:40Z.
+	 *     `timestampISO` is supplied ready-made by NodeBB, so it is used directly
+	 *     and the arithmetic is gone entirely.
+	 *
+	 *  2. The v3 topic object has NO `username` field (checked against the live
+	 *     API: both `username` and `user` are undefined), so the fallback always
+	 *     fired and every thread intro read `_unknown`. The author's name is
+	 *     resolved from `uid` instead, and the caller may pass a pre-resolved
+	 *     name.
+	 *
+	 *  3. The link used the API url, which on this host is the loopback address -
+	 *     so Discord showed `http://127.0.0.1:4567/topic/24`, unreachable for
+	 *     every reader. It now uses `nodebb.publicUrl`.
+	 *
+	 * @param {object} topic   v3 topic object
+	 * @param {string} [authorName] pre-resolved display name, when the caller has one
+	 */
+	/**
+	 * Resolve the display name of a topic's author from its `uid`.
+	 *
+	 * Needed because the v3 topic object does not embed the author: it carries
+	 * `uid` only, and both `username` and `user` come back undefined (verified
+	 * against the live API). Without this lookup every thread intro read
+	 * `_unknown - <date>_`.
+	 *
+	 * Best-effort by design: a lookup failure degrades the intro's author line,
+	 * which must never be a reason to fail thread creation.
+	 *
+	 * @param {object} topic v3 topic object
+	 * @returns {Promise<string>} display name, or '' when it cannot be resolved
+	 */
+	async topicAuthorName(topic) {
+		const uid = Number(topic && topic.uid);
+		if (!uid) {
+			return '';
+		}
+		try {
+			const user = await this.nodebb.getUser(uid);
+			return String((user && (user.displayname || user.username)) || '').trim();
+		} catch (err) {
+			this.log.debug('could not resolve topic author', { tid: topic.tid, uid, err: err.message });
+			return '';
+		}
+	}
+	threadIntro(topic, authorName) {
+		const link = `${this.config.nodebb.publicUrl}/topic/${topic.tid}`;
+		// Prefer NodeBB's own ISO string; it needs no unit assumption at all.
+		let when = topic.timestampISO || '';
+		if (!when && Number(topic.timestamp)) {
+			// Older/raw shapes still carry an epoch, which the API documents as ms.
+			// Guard the magnitude anyway so a seconds-valued source cannot produce
+			// a year-58750 timestamp again.
+			const raw = Number(topic.timestamp);
+			const ms = raw < 1e12 ? raw * 1000 : raw;
+			when = new Date(ms).toISOString();
+		}
+		if (!when) {
+			when = 'tanggal tidak diketahui';
+		}
+		const who = String(authorName || topic.username || '').trim() || 'pengguna forum';
 		return [
 			`**${mdEscape(String(topic.title || 'Untitled').replace(/\[t:\d+\]/g, '').trim())}**`,
-			`_${topic.username ? mdEscape(topic.username) : 'unknown'} - ${when}_`,
+			`_${mdEscape(who)} - ${when}_`,
 			`[Buka di forum.imrnes.team](${link})`,
 			MARKER,
 		].join('\n');
@@ -876,10 +945,10 @@ class ForumMirror {
 		try {
 			await this.discord.sendToThread(threadId, {
 				content: this.renderDiscordPost({
-					name, rank, html: post.content, link: `${this.config.nodebb.url}/post/${post.pid}`,
+					name, rank, html: post.content, link: `${this.config.nodebb.publicUrl}/post/${post.pid}`,
 				}),
 				webhookName: webhookSafe(name),
-				webhookAvatar: author && author.picture ? `${this.config.nodebb.url}${author.picture}` : null,
+				webhookAvatar: author && author.picture ? `${this.config.nodebb.publicUrl}${author.picture}` : null,
 			});
 			sent = true;
 		} catch (err) {
@@ -908,10 +977,10 @@ class ForumMirror {
 			try {
 				await this.discord.sendToThread(fresh, {
 					content: this.renderDiscordPost({
-						name, rank, html: post.content, link: `${this.config.nodebb.url}/post/${post.pid}`,
+						name, rank, html: post.content, link: `${this.config.nodebb.publicUrl}/post/${post.pid}`,
 					}),
 					webhookName: webhookSafe(name),
-					webhookAvatar: author && author.picture ? `${this.config.nodebb.url}${author.picture}` : null,
+					webhookAvatar: author && author.picture ? `${this.config.nodebb.publicUrl}${author.picture}` : null,
 				});
 				this.log.info('re-created discord thread and delivered', { tid: topic.tid, thread: fresh });
 				if (post.pid) {

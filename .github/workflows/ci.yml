@@ -67,6 +67,16 @@ jobs:
       - name: Media render checks
         run: npm run check:media
 
+      # smoke-thread-intro.js pins the three bugs that produced one visibly
+      # broken Discord message from a real thread: `topic.timestamp` is in
+      # MILLISECONDS (multiplying by 1000 rendered year +058750), the v3 topic
+      # object has NO username field at all (so every intro read `_unknown`),
+      # and the link used the loopback API url which no Discord reader can open.
+      # The loopback check in config.publicForumUrl is the structural guard;
+      # these assertions are what keep it honest.
+      - name: Thread intro checks
+        run: npm run check:intro
+
       # check-nodebb-url.js rejects a NODEBB_URL that points at a retired
       # docker-bridge address (10.0.x.x) or the retired /usr/src/app container
       # path. On 2026-10-16 that exact misconfiguration kept the unit

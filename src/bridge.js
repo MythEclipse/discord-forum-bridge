@@ -269,7 +269,7 @@ class Bridge {
 		}
 		const rank = this.identity.rankTitleFor(author ? author.postcount : 0);
 		const name = (author && (author.displayname || author.username)) || 'Forum user';
-		const link = `${this.config.nodebb.url}/post/${post.pid}`;
+		const link = `${this.config.nodebb.publicUrl}/post/${post.pid}`;
 		await this.discord.send({
 			channelId: this.config.discord.channelId,
 			content: `**${name}** [${rank.replace(/[\[\]]/g, '')}]\n${this.forumPostToDiscordText(post, author)}\n${link}`,

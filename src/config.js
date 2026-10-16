@@ -68,7 +68,20 @@ function buildConfig() {
 		maxAttachments: Number(env.DISCORD_MAX_ATTACHMENTS || 5),
 	},
 	nodebb: {
-		url: (env.NODEBB_URL || 'https://forum.imrnes.team').replace(/\/+$/, ''),
+		// Where the bridge SENDS its API requests. The loopback address is
+		// deliberate and cheap: it skips Caddy entirely and cannot be affected by
+		// a proxy or certificate problem.
+		url: (env.NODEBB_URL || 'http://127.0.0.1:4567').replace(/\/+$/, ''),
+		// The PUBLIC origin, used for every URL that LEAVES the host: links
+		// pasted into Discord, webhook avatar urls, and absolutising site-relative
+		// upload paths.
+		//
+		// These are two different values and conflating them produced a real,
+		// user-visible bug: a mirrored post reached Discord with
+		// `http://127.0.0.1:4567/topic/24` as its "Buka di forum" link, which
+		// points at the SERVER'S OWN localhost and is meaningless to the reader.
+		// Every API call kept succeeding, so nothing looked broken from here.
+		publicUrl: publicForumUrl(env),
 		apiToken: required('NODEBB_API_TOKEN'),
 		// The token handed to the bridge is a MASTER token, which NodeBB only
 		// accepts together with `?_uid=`. Leaving authMode on 'user' would 400 on
@@ -95,9 +108,57 @@ function buildConfig() {
 // is absent - which blocks forum-only tooling from loading the NodeBB half.
 let cached = null;
 
+/**
+ * The PUBLIC origin of the forum, for URLs that leave the host.
+ *
+ * Exists because `NODEBB_URL` serves two incompatible purposes. It is the API
+ * endpoint, where the loopback address is correct and cheap. It is ALSO the
+ * origin stamped into links handed to Discord readers, where the loopback
+ * address is meaningless.
+ *
+ * Precedence:
+ *   1. FORUM_PUBLIC_URL - the explicit setting.
+ *   2. NODEBB_URL, but ONLY when it is not a loopback address.
+ *   3. The configured default.
+ *
+ * The loopback check is the important part. Falling back to a bare loopback
+ * value would reintroduce the exact bug this function exists to prevent, and it
+ * would be invisible: every API call still succeeds, so the bridge reports
+ * itself healthy while every link it publishes is dead on arrival.
+ *
+ * A HOST:PORT without a scheme is also rejected, because NodeBB would then be
+ * asked for `HOST:PORT/api/...` over plain HTTP and reject it.
+ *
+ * @param {object} env parsed process env
+ * @returns {string} an absolute public origin, no trailing slash
+ */
+function publicForumUrl(env) {
+	const explicit = String(env.FORUM_PUBLIC_URL || '').trim().replace(/\/+$/, '');
+	if (explicit) {
+		return explicit;
+	}
+	const fallback = 'https://forum.imrnes.team';
+	const candidate = String(env.NODEBB_URL || '').trim();
+	if (!candidate) {
+		return fallback;
+	}
+	// Loopback in any of the forms a config can carry: 127.0.0.1, ::1, localhost,
+	// and the 0.0.0.0 wildcard a bind address often uses.
+	if (/^(https?:\/\/)?(127\.\d+\.\d+\.\d+|localhost|\[::1\]|0\.0\.0\.0|\[::\])(:\d+)?(\/|$)/i.test(candidate)) {
+		return fallback;
+	}
+	// Without a scheme NodeBB cannot route the request; treat it as unusable
+	// rather than shipping a url that only fails at request time.
+	if (!/^https?:\/\//i.test(candidate)) {
+		return fallback;
+	}
+	return candidate.replace(/\/+$/, '');
+}
+
 module.exports = {
 	parseEnv,
 	loadNodebbConfig,
+	publicForumUrl,
 	get config() {
 		if (!cached) {
 			cached = buildConfig();
