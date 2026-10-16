@@ -1,0 +1,111 @@
+name: Deploy
+
+# Deploys to imrnes over SSH after CI is green. The key in authorized_keys runs
+# /usr/local/bin/gh-actions-bridge as a FORCED COMMAND, so this workflow cannot
+# obtain a shell on the host even if the runner token leaks: the allowlist is the
+# deploy script plus two read-only probes. `.env` (NodeBB API token, Discord bot
+# token) is not readable through it.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: discord-forum-bridge-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to imrnes
+    runs-on: ubuntu-latest
+    # Deploy lives in this workflow, so it cannot `needs:` the CI job that runs in
+    # .github/workflows/ci.yml - GitHub only links jobs inside one workflow file.
+    # The ordering guarantee is instead: CI is the required status check on
+    # master, so a red test never reaches a merge. This job is additionally gated
+    # by the `production` environment below.
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install the deploy key
+        # The file redirect keeps the private key out of argv, out of any
+        # variable, and out of the transcript.
+        run: |
+          install -m 600 /dev/null ~/.ssh/deploy_key
+          cat ~/.ssh/deploy_key <<< "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H 43.134.105.109 >> ~/.ssh/known_hosts
+
+      # A hosted runner has no route to 100.64.0.0/10, so VPS_HOST is the PUBLIC
+      # IP by design. Declared in `env:` on every step that uses it - interpolating
+      # a secret without one expands to empty and ssh exits 255 with a bare usage
+      # banner that names nothing.
+      - name: Verify the host is reachable and the restriction holds
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          DEPLOY_KEY: ${{ runner.temp }}/deploy_key
+        run: |
+          set -euo pipefail
+          # An allowlisted, meaningful command. `true` is NOT in the allowlist and
+          # would be refused, which reads as "cannot SSH" when the key is fine.
+          out=$(ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
+                "root@$VPS_HOST" "test -s /opt/discord-forum-bridge/src/main.js")
+          echo "bridge entrypoint present: $out"
+
+          # Negative control: the forced command must refuse a shell. If this ever
+          # succeeds, the key is NOT restricted and the deploy must not proceed.
+          if ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
+               "root@$VPS_HOST" "id" 2>/dev/null; then
+            echo "::error::the deploy key obtained a shell - refusing to deploy"
+            exit 1
+          fi
+          echo "key is restricted to the deploy allowlist (shell refused as expected)"
+
+      - name: Deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          DEPLOY_KEY: ${{ runner.temp }}/deploy_key
+        run: |
+          set -euo pipefail
+          ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
+              "root@$VPS_HOST" "bash /opt/discord-forum-bridge/deploy.sh"
+
+      - name: Post-deploy verification
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          DEPLOY_KEY: ${{ runner.temp }}/deploy_key
+        run: |
+          set -euo pipefail
+          # The deploy script restarts the bridge, but an independent read-back
+          # proves the unit is serving and that the mirror cursors survived -
+          # a lost state.json makes the next poll re-mirror whole topic
+          # histories into Discord.
+          status=$(ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
+                     "root@$VPS_HOST" "systemctl --user is-active discord-forum-bridge.service")
+          echo "bridge unit: $status"
+          [ "$status" = "active" ] || { echo "::error::bridge is $status after deploy"; exit 1; }
+
+          ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
+              "root@$VPS_HOST" "cat /opt/discord-forum-bridge/data/state.json" \
+            | node -e '
+              let d = "";
+              process.stdin.on("data", (c) => (d += c)).on("end", () => {
+                const s = JSON.parse(d);
+                const cursors = Object.keys(s.topicCursors || {}).length;
+                const threads = Object.keys(s.threads || {}).length;
+                console.log(`mirror state after deploy: ${cursors} cursors, ${threads} threads`);
+                if (!cursors || !threads) {
+                  console.error("::error::mirror state is empty - the next poll would flood Discord");
+                  process.exit(1);
+                }
+              });
+            '
+
+      - name: Clean up the key
+        if: always()
+        run: rm -f "${{ runner.temp }}/deploy_key"
