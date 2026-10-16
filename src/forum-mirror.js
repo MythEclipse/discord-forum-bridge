@@ -32,7 +32,7 @@
 const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown, setForumUrl, absolutiseImages } = require('./text');
 const { readState, writeState } = require('./state');
 
-const TOPIC_PAGE_SIZE = 50;
+const TOPIC_PAGE_SIZE = 25;
 
 // Channel types that host threads and therefore accept one thread per topic.
 const FORUM_TYPES = new Set([15 /* GuildForum */, 16 /* GuildMedia */]);
