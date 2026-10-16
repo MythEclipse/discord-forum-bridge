@@ -57,6 +57,16 @@ jobs:
       - name: Forum mode checks
         run: npm run check:forum
 
+      # check-nodebb-url.js rejects a NODEBB_URL that points at a retired
+      # docker-bridge address (10.0.x.x) or the retired /usr/src/app container
+      # path. On 2026-10-16 that exact misconfiguration kept the unit
+      # "active (running)" while every poll died with ETIMEDOUT, so the mirror
+      # was silently broken and systemctl reported success. It skips cleanly
+      # when the checkout has no .env, and it listens-checked the loopback
+      # target when one is configured.
+      - name: NodeBB URL guard
+        run: npm run check:url
+
       # The vendored plugin-bridge-upload/ copy drifted badly enough to be
       # actively misleading: it still resolved the app root to the Docker path,
       # so anyone reading this repo would copy code that cannot work on a native
