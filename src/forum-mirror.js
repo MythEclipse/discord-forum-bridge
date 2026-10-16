@@ -29,7 +29,7 @@
  * / bot id are a second line of defence.
  */
 
-const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown, setForumUrl, absolutiseImages } = require('./text');
+const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown, setForumUrl, absolutiseImages, mediaKind, contentKind } = require('./text');
 const { readState, writeState } = require('./state');
 
 const TOPIC_PAGE_SIZE = 25;
@@ -742,7 +742,14 @@ class ForumMirror {
 					buf, filename,
 					{ asUid: forumUid || undefined, contentType: resolved.contentType }
 				);
-				out.push({ url: uploaded.url, name: uploaded.name || filename, isImage: true });
+				out.push({
+					url: uploaded.url,
+					name: uploaded.name || filename,
+					isImage: true,
+					// A Lottie sticker is mirrored as its node-side raster preview, so
+					// it is always an image on the forum regardless of format_type.
+					kind: 'image',
+				});
 				this.log.debug('sticker mirrored', {
 					discord: message.id, sticker: item.id, format: resolved.extension,
 				});
@@ -783,11 +790,18 @@ class ForumMirror {
 			try {
 				// eslint-disable-next-line no-await-in-loop
 				const buf = await this.nodebb.downloadBinary(url);
+				// `att.type` is Discord's own content-type, the most reliable signal for
+				// how the forum should RENDER the file - text.js mediaKind() trusts it
+				// over the forum url, which NodeBB rewrites on upload.
 				// eslint-disable-next-line no-await-in-loop
 				const uploaded = await this.nodebb.uploadAttachment(
 					buf, (att.name || 'attachment'), { asUid: forumUid || undefined, contentType: att.type }
 				);
-				out.push({ url: uploaded.url, name: uploaded.name });
+				out.push({
+					url: uploaded.url,
+					name: uploaded.name,
+					kind: mediaKind({ url: uploaded.url, name: uploaded.name, kind: contentKind(att.type) }),
+				});
 			} catch (err) {
 				this.log.warn('attachment upload failed', {
 					discord: message.id, file: att.name, err: err.message,

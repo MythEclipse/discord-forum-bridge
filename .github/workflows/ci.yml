@@ -57,6 +57,16 @@ jobs:
       - name: Forum mode checks
         run: npm run check:forum
 
+      # smoke-media.js pins the four render shapes an attachment can take.
+      # The <video>/<audio> assertions are the tripwire for a forum-side
+      # setting the bridge cannot see: nodebb-plugin-markdown escapes raw
+      # HTML into visible text unless settings:markdown carries
+      # {"html":"on"} (the value MUST be the string 'on'). Reverting that on
+      # the forum would silently turn every mirrored video into literal
+      # "<video controls ...>" text, and these assertions are what catch it.
+      - name: Media render checks
+        run: npm run check:media
+
       # check-nodebb-url.js rejects a NODEBB_URL that points at a retired
       # docker-bridge address (10.0.x.x) or the retired /usr/src/app container
       # path. On 2026-10-16 that exact misconfiguration kept the unit

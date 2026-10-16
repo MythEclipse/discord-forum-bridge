@@ -399,9 +399,13 @@ function makeMirror(overrides = {}) {
 			/!\[[^\]]*px\\?\.png[^\]]*\]\(https:\/\/forum\.imrnes\.team\/assets\/uploads\/files\/1-px\.png\)/.test(body),
 			`images render inline as markdown, got:\n${body}`
 		);
+		// A video must NOT be a markdown image (that renders a broken thumb) and
+		// must NOT be a bare link either: it gets a real <video controls> player.
+		// This changed on 2026-10-17 - the old assertion demanded a plain link,
+		// which was the behaviour that made mirrored videos unusable.
 		assert.ok(
-			body.includes('(https://forum.imrnes.team/assets/uploads/files/1-clip.mp4)'),
-			'non-image attachments become a link, not a broken image thumb'
+			/<video controls[^>]*src="https:\/\/forum\.imrnes\.team\/assets\/uploads\/files\/1-clip\.mp4"/.test(body),
+			`video renders as an HTML5 player, got:\n${body}`
 		);
 		assert.ok(!body.includes('![clip.mp4]'), 'a video is never emitted as a markdown image');
 		// the Discord CDN url must never leak into the forum post

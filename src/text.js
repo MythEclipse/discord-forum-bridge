@@ -160,7 +160,68 @@ function mdCode(text) {
 }
 
 /**
-	 * Build the markdown body for a Discord reply mirrored into a forum topic.
+ * Map a Discord content-type to the coarse media KIND the renderer cares about.
+ *
+ * Discord reports a precise type (`image/gif`, `video/mp4`, `audio/ogg`) and
+ * that survives even when the forum renames the file on upload, so it beats the
+ * extension. The subtype parameter may carry a codec (`audio/ogg; codecs=opus`),
+ * so only the leading type/subtype is read.
+ *
+ * @param {string} [contentType]
+ * @returns {'image'|'video'|'audio'|''} '' when the type says nothing useful
+ */
+function contentKind(contentType) {
+	const top = String(contentType || '').split(';')[0].trim().toLowerCase();
+	if (!top) {
+		return '';
+	}
+	const [type] = top.split('/');
+	if (type === 'image' || type === 'video' || type === 'audio') {
+		return type;
+	}
+	return '';
+}
+
+/**
+ * Classify an attachment into the render shape it needs.
+ *
+ * `att.kind` is the authoritative signal because it comes from the CONTENT-TYPE
+ * Discord reported (`att.type`), which survives even when the forum renames the
+ * file on upload. The extension of the FORUM url is only a fallback: NodeBB
+ * rewrites names on collision (`file.png` -> `1234-file.png`), so the extension
+ * survives, but a host that renames without an extension would not.
+ *
+ * Anything unrecognised deliberately falls through to a plain link. Guessing
+ * "image" for an unknown type would render a broken thumbnail, which is worse
+ * than a link the reader can always click.
+ *
+ * @param {{url?: string, name?: string, kind?: string, contentType?: string, isImage?: boolean}} att
+ * @returns {'image'|'video'|'audio'|'other'}
+ */
+function mediaKind(att) {
+	const kind = String((att && att.kind) || '').toLowerCase();
+	if (kind === 'image' || kind === 'video' || kind === 'audio') {
+		return kind;
+	}
+	// A sticker was already resolved to a raster image by mirrorStickers().
+	if (att && att.isImage) {
+		return 'image';
+	}
+	const probe = `${(att && att.url) || ''} ${(att && att.name) || ''}`.toLowerCase();
+	if (/\.(png|jpe?g|gif|webp|bmp|avif|apng|svg)(?:$|[?#\s])/i.test(probe)) {
+		return 'image';
+	}
+	if (/\.(mp4|webm|mov|m4v|ogv|mkv)(?:$|[?#\s])/i.test(probe)) {
+		return 'video';
+	}
+	if (/\.(mp3|ogg|oga|opus|wav|m4a|flac|aac|weba)(?:$|[?#\s])/i.test(probe)) {
+		return 'audio';
+	}
+	return 'other';
+}
+
+/**
+ * Build the markdown body for a Discord reply mirrored into a forum topic.
 	 *
 	 * Direction matters here. Forum -> Discord renders the rank as a label
 	 * because Discord has no plugin that can style an author's badge. The
@@ -196,15 +257,35 @@ function forumPostMarkdown({ nickname, rank, content, link, attachments = [] }) 
 		lines.push('', `[Lihat di Discord](${link.replace(/[()]/g, encodeURIComponent)})`);
 	}
 	// Attachments are uploaded to the forum first (nodebb.js uploadAttachment), so
-	// they arrive here as absolute forum URLs. Images get an inline markdown image
-	// so they render inside the quoted block; anything else becomes a plain link,
-	// because a markdown image of a video/audio file renders as a broken thumb.
+	// they arrive here as absolute forum URLs.
+	//
+	// Three render shapes, decided by media KIND rather than by extension alone:
+	//
+	//   image  -> inline markdown image. Also covers animated GIF/APNG: the file
+	//             is re-uploaded byte-for-byte, and NodeBB does not rasterise
+	//             animated sources (verified: a 3-frame GIF came back out of the
+	//             live route with all frames and its NETSCAPE loop intact).
+	//   video  -> <video controls>. A markdown image of an mp4 renders a broken
+	//             thumbnail; the forum's sanitizer explicitly allows video with
+	//             controls/preload/src (src/posts/parse.js).
+	//   audio  -> <audio controls>. Same reasoning.
+	//
+	// The raw tags only survive because `settings:markdown` carries
+	// {"html": "on"}; nodebb-plugin-markdown runs markdown-it with html:false by
+	// default, which escapes a literal `<video>` into visible text. That value
+	// MUST be the string 'on' (the plugin compares `options[field] === 'on'`).
+	// scripts/enable-nodebb-media.sh documents and applies the forum-side half.
 	if (attachments.length) {
 		lines.push('');
 		attachments.forEach((att) => {
 			const href = String(att.url || '').replace(/[()]/g, encodeURIComponent);
-			if (/\.(png|jpe?g|gif|webp|bmp|avif)(?:$|[?#])/i.test(href) || att.isImage) {
+			const kind = mediaKind(att);
+			if (kind === 'image') {
 				lines.push(`![${mdAlt(att.name || 'gambar')}](${href})`);
+			} else if (kind === 'video') {
+				lines.push(`<video controls preload="none" src="${href}"></video>`);
+			} else if (kind === 'audio') {
+				lines.push(`<audio controls preload="none" src="${href}"></audio>`);
 			} else {
 				lines.push(`[${mdAlt(att.name || 'lampiran')}: ${href}](${href})`);
 			}
@@ -218,6 +299,10 @@ function forumPostMarkdown({ nickname, rank, content, link, attachments = [] }) 
 }
 
 module.exports = {
+	// Exported so forum-mirror.js classifies a freshly uploaded attachment with
+	// the exact same rules the renderer uses - one function, no drift.
+	mediaKind,
+	contentKind,
 	// Rewrite a site-relative markdown destination into an absolute one.
 	//
 	// Two independent reasons this is needed, both observed live:
@@ -229,15 +314,20 @@ module.exports = {
 	//
 	// Applied to the FINAL text, not inside the HTML chain, so it covers both
 	// shapes. `//host/...` is protocol-relative and must be left alone.
+	//
+	// The `src="..."` half covers the media players. A site-relative video/audio
+	// src still resolves in a browser on the forum itself, but it breaks the
+	// moment the post is read from another origin (a Discord preview, a cache,
+	// or the mirrored copy the bridge posts back), so it is absolutised too.
 	absolutiseImages(text) {
 		const origin = String(FORUM_URL || '').replace(/\/+$/, '');
 		if (!origin) {
 			return String(text || '');
 		}
-		return String(text || '').replace(
-			/(\]\()(\/(?!\/)[^)\s]*)/g,
-			(m, prefix, href) => `${prefix}${origin}${href.replace(/[()]/g, encodeURIComponent)}`
-		);
+		const esc = (href) => href.replace(/[()]/g, encodeURIComponent);
+		return String(text || '')
+			.replace(/(\]\()(\/(?!\/)[^)\s]*)/g, (m, prefix, href) => `${prefix}${origin}${esc(href)}`)
+			.replace(/(\ssrc=")(\/(?!\/)[^"]*)/g, (m, prefix, href) => `${prefix}${origin}${esc(href)}`);
 	},
 
 	MARKER, setForumUrl, htmlEscape, mdEscape, mdLiteral, mdCode, webhookSafe, htmlToPlainText, forumPostMarkdown,
