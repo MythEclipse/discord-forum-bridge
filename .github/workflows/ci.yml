@@ -89,6 +89,18 @@ jobs:
       - name: Thread intro checks
         run: npm run check:intro
 
+      # smoke-notice.js pins the fix for the "Diskusi ini sekarang ada di forum"
+      # notification. That message looked twice as long as it was because Discord
+      # unfurled the forum link inside it: NodeBB serves a topic's first post as
+      # BOTH og:title and og:description, so the reader saw the sentence twice in
+      # one card. The suite asserts the notice is off by default, that no mode can
+      # reintroduce the duplicate (embeds are suppressed in every posted mode),
+      # and that the thread starter suppresses its own unfurl. It also asserts the
+      # call sites, because a correct policy module that nothing imports would
+      # pass every behavioural test and still ship the bug.
+      - name: Notice and embed-suppression checks
+        run: npm run check:notice
+
       # check-nodebb-url.js rejects a NODEBB_URL that points at a retired
       # docker-bridge address (10.0.x.x) or the retired /usr/src/app container
       # path. On 2026-10-16 that exact misconfiguration kept the unit

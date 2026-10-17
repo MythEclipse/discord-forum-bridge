@@ -30,6 +30,7 @@
  */
 
 const { MARKER, mdEscape, webhookSafe, htmlToPlainText, forumPostMarkdown, setForumUrl, absolutiseImages, mediaKind, contentKind } = require('./text');
+const { INTRO_FLAGS } = require('./notice');
 const { readState, writeState } = require('./state');
 
 const TOPIC_PAGE_SIZE = 25;
@@ -387,6 +388,11 @@ class ForumMirror {
 		const created = await this.discord.createThread(this.config.discord.channelId, {
 			name,
 			message: this.threadIntro(topic, authorName),
+			// The intro's only link points back at the very topic it announces, so
+			// its unfurl can only restate the message. Unsuppressed, it rendered the
+			// topic's first line TWICE in one card (NodeBB supplies that text as both
+			// og:title and og:description). See src/notice.js.
+			flags: INTRO_FLAGS,
 		});
 		this.topicToThread.set(tid, created.id);
 		this.threadToTopic.set(created.id, tid);

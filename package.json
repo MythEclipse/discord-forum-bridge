@@ -6,7 +6,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
-    "check": "npm run check:guard && npm run check:url && npm run check:client && npm run check:forum && npm run check:media && npm run check:intro",
+    "check": "npm run check:guard && npm run check:url && npm run check:client && npm run check:forum && npm run check:media && npm run check:intro && npm run check:notice",
     "probe:forum": "node scripts/probe-forum.js",
     "invite": "node scripts/invite-url.js",
     "probe:restart": "BRIDGE_DATA_DIR=$(mktemp -d) node scripts/probe-restart.js",
@@ -15,6 +15,7 @@
     "check:url": "node scripts/check-nodebb-url.js",
     "check:media": "node scripts/smoke-media.js",
     "check:intro": "node scripts/smoke-thread-intro.js",
+    "check:notice": "node scripts/smoke-notice.js",
     "check:guard": "node scripts/smoke-state-guard.js"
   },
   "engines": {

@@ -235,7 +235,7 @@ class DiscordTransport {
 		return { threads, hasMore: threads.length >= limit };
 	}
 
-	async createThread(parentId, { name, message }) {
+	async createThread(parentId, { name, message, flags }) {
 		if (!message || !String(message).trim()) {
 			throw new Error('createThread needs a starter message for forum channels');
 		}
@@ -246,9 +246,17 @@ class DiscordTransport {
 		// ChannelType.GuildForum === 15, GuildMedia === 16. discord.js 14.x has no
 		// `isForum()` helper, so compare the raw type.
 		if (parent.type === 15 || parent.type === 16) {
+			// `flags` rides along inside the starter message payload, so a thread
+			// starter can suppress its own link previews. Verified against
+			// discord.js 14.27: ForumThreadManager.create passes the message
+			// straight to MessagePayload, whose resolveBody() emits `flags`.
+			const starter = { content: String(message) };
+			if (flags) {
+				starter.flags = flags;
+			}
 			const thread = await parent.threads.create({
 				name: String(name).slice(0, 100),
-				message: { content: String(message) },
+				message: starter,
 				invitable: false,
 			});
 			return { id: thread.id, name: thread.name };

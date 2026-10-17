@@ -16,6 +16,7 @@ const { createClient } = require('./nodebb');
 const { DiscordTransport } = require('./discord-transport');
 const { ForumMirror } = require('./forum-mirror');
 const { IdentityStore } = require('./identity');
+const { noticePlan } = require('./notice');
 const log = require('./log');
 
 async function main() {
@@ -110,11 +111,21 @@ async function main() {
 					{ author: message.author }
 				);
 				if (res && res.created) {
-					// Confirm in-channel so the user is not left guessing whether the
-					// post landed. Failure to send this must not undo the topic.
-					await message.channel.send(
-						`:white_check_mark: Diskusi ini sekarang ada di forum: ${config.nodebb.publicUrl}/topic/${res.tid}`
-					).catch((err) => log.warn('could not post the topic link', err.message));
+					// The confirmation is OPTIONAL and defaults to off: adopting the
+					// thread onto the forum is the job, and the forum topic exists
+					// either way. See src/notice.js for why it also suppresses the
+					// link's unfurl (the unfurl duplicated the topic's first line).
+					//
+					// Failure to send this must never undo the topic.
+					const plan = noticePlan(config.forum.notice);
+					if (plan.send) {
+						await message.channel.send({
+							content: `:white_check_mark: Diskusi ini sekarang ada di forum: ${config.nodebb.publicUrl}/topic/${res.tid}`,
+							flags: plan.flags,
+						}).catch((err) => log.warn('could not post the topic link', err.message));
+					} else {
+						log.debug('forum adoption notice suppressed', { tid: res.tid, mode: plan.mode });
+					}
 				}
 			}
 		} catch (err) {

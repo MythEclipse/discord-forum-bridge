@@ -94,6 +94,20 @@ function buildConfig() {
 		// '1' creates a Discord thread for every existing topic at boot. Set to
 		// '0' to only mirror topics that get activity after start.
 		backfill: env.FORUM_BACKFILL || '1',
+		// Whether the "this discussion is now on the forum" confirmation is posted
+		// in the Discord thread when it is adopted onto the forum.
+		//
+		//   off    - not posted (default). Adoption still happens; the reader just
+		//            is not told in-channel.
+		//   silent - posted with SUPPRESS_NOTIFICATIONS: no badge, ping or push.
+		//   on     - posted normally.
+		//
+		// The confirmation used to be posted unconditionally, and its link back to
+		// the topic it announces made Discord unfurl the forum page - so the
+		// reader saw the topic's first line twice in one card (og:title and
+		// og:description both carry it). Embedded previews are now suppressed on
+		// it in every mode; see src/notice.js.
+		notice: env.BRIDGE_NOTICE || 'off',
 	},
 	behaviour: {
 		syncIntervalMs: num('SYNC_INTERVAL_SECONDS', 20) * 1000,
